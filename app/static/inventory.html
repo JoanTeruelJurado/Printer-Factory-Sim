@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Inventory — 3D Printer Factory Simulator</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <main>
+    <h1>Inventory</h1>
+    <p>Current warehouse stock levels and reserved material from the database.</p>
+    <div class="nav-row">
+      <a class="button" href="/static/index.html">Home</a>
+      <a class="button" href="/static/dashboard.html">Dashboard</a>
+      <a class="button" href="/static/orders.html">Orders</a>
+      <a class="button" href="/static/config.html">Configuration</a>
+    </div>
+
+    <div id="summary" class="section"></div>
+    <div id="inventory-error" class="section" style="color:#b91c1c;"></div>
+    <table id="inventory-table" class="section" style="width:100%; border-collapse: collapse; display:none;">
+      <thead>
+        <tr>
+          <th style="text-align:left; padding:10px; border-bottom: 1px solid #d1d5db;">Material</th>
+          <th style="text-align:right; padding:10px; border-bottom: 1px solid #d1d5db;">Quantity</th>
+          <th style="text-align:right; padding:10px; border-bottom: 1px solid #d1d5db;">Reserved</th>
+          <th style="text-align:right; padding:10px; border-bottom: 1px solid #d1d5db;">Volume / unit</th>
+          <th style="text-align:right; padding:10px; border-bottom: 1px solid #d1d5db;">Total volume</th>
+        </tr>
+      </thead>
+      <tbody id="inventory-body"></tbody>
+    </table>
+  </main>
+
+  <script>
+    async function loadInventory() {
+      const errorEl = document.getElementById('inventory-error');
+      const summaryEl = document.getElementById('summary');
+      const table = document.getElementById('inventory-table');
+      const body = document.getElementById('inventory-body');
+
+      try {
+        const [inventoryResp, stateResp] = await Promise.all([
+          fetch('/api/game/inventory'),
+          fetch('/api/game/state'),
+        ]);
+
+        if (!inventoryResp.ok) {
+          throw new Error('Failed to load inventory');
+        }
+        if (!stateResp.ok) {
+          throw new Error('Failed to load game state');
+        }
+
+        const inventory = await inventoryResp.json();
+        const state = await stateResp.json();
+
+        const totalVolume = inventory.reduce((sum, item) => sum + item.total_volume, 0);
+        summaryEl.innerHTML = `
+          <p><strong>Warehouse capacity:</strong> ${state.warehouse_used} / ${state.warehouse_capacity}</p>
+          <p><strong>Total inventory volume:</strong> ${totalVolume.toFixed(2)}</p>
+          <p><strong>Warning level:</strong> ${state.warning_level ?? 'normal'}</p>
+        `;
+
+        if (inventory.length === 0) {
+          body.innerHTML = '<tr><td colspan="5" style="padding:12px; text-align:center; color:#6b7280;">No inventory records found.</td></tr>';
+          table.style.display = 'table';
+          return;
+        }
+
+        body.innerHTML = inventory.map(item => `
+          <tr>
+            <td style="padding:10px; border-bottom: 1px solid #e5e7eb;">${item.material_name}</td>
+            <td style="padding:10px; border-bottom: 1px solid #e5e7eb; text-align:right;">${item.quantity}</td>
+            <td style="padding:10px; border-bottom: 1px solid #e5e7eb; text-align:right;">${item.reserved_quantity}</td>
+            <td style="padding:10px; border-bottom: 1px solid #e5e7eb; text-align:right;">${item.volume_per_unit}</td>
+            <td style="padding:10px; border-bottom: 1px solid #e5e7eb; text-align:right;">${item.total_volume.toFixed(2)}</td>
+          </tr>
+        `).join('');
+        table.style.display = 'table';
+      } catch (error) {
+        errorEl.textContent = error.message;
+      }
+    }
+
+    loadInventory();
+  </script>
+</body>
+</html>
