@@ -86,7 +86,7 @@ def generate_demand_orders(db: Session, current_day: int) -> int:
     Returns:
         Number of demand orders created
     """
-    num_orders = random.randint(0, 5)
+    num_orders = random.randint(1, 2)
     orders_created = 0
     
     if num_orders == 0:
@@ -398,6 +398,26 @@ def fulfill_demand_orders(db: Session, current_day: int) -> dict:
     }
 
 
+def mark_expired_demands(db: Session, current_day: int) -> int:
+    """Mark open demand orders past their due date as lost."""
+    expired = db.query(DemandOrder).filter(
+        DemandOrder.status.in_(["open", "partial"]),
+        DemandOrder.due_day < current_day,
+    ).all()
+
+    for demand in expired:
+        demand.status = "lost"
+        log_event(
+            db,
+            "DEMAND_EXPIRED",
+            current_day,
+            "alert",
+            {"demand_id": demand.id, "product_id": demand.product_id, "quantity": demand.quantity},
+        )
+
+    return len(expired)
+
+
 def calculate_daily_costs(db: Session, current_day: int) -> float:
     """
     Calculate and deduct daily operational costs.
@@ -542,22 +562,16 @@ def advance_day(db: Session) -> dict:
         
         # 4. Process production
         production_stats = process_production(db, current_day)
-        
-        # 5. Fulfill demand
-        fulfillment_stats = fulfill_demand_orders(db, current_day)
-        
+
+        # 5. Mark expired demand orders as lost (manual fulfillment — no auto-revenue)
+        expired = mark_expired_demands(db, current_day)
+
         # 6. Calculate costs
         calculate_daily_costs(db, current_day)
-        
-        # Add production cost to wallet
+
+        # Deduct production costs
         game_state.wallet_balance -= production_stats["cost"]
-        
-        # Add revenue from fulfilled orders
-        game_state.wallet_balance += fulfillment_stats["revenue"]
-        
-        # Deduct penalties
-        game_state.wallet_balance -= fulfillment_stats["penalties"]
-        
+
         log_event(
             db,
             "DAY_SUMMARY",
@@ -568,8 +582,7 @@ def advance_day(db: Session) -> dict:
                 "deliveries": deliveries,
                 "produced": production_stats["produced"],
                 "production_cost": production_stats["cost"],
-                "revenue": fulfillment_stats["revenue"],
-                "penalties": fulfillment_stats["penalties"],
+                "expired_demands": expired,
                 "wallet_balance": game_state.wallet_balance,
             },
         )
@@ -590,8 +603,7 @@ def advance_day(db: Session) -> dict:
             "deliveries": deliveries,
             "produced": production_stats["produced"],
             "production_cost": production_stats["cost"],
-            "revenue": fulfillment_stats["revenue"],
-            "penalties": fulfillment_stats["penalties"],
+            "expired_demands": expired,
             "wallet_balance": game_state.wallet_balance,
             "game_over": is_game_over,
         }

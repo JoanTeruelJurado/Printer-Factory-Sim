@@ -222,15 +222,30 @@ def seed_initial_data() -> None:
 
 from datetime import datetime
 
+from app.db.models import DemandOrder, Event, ManufacturingOrder, PurchaseOrder
+
 
 def reset_game(db: Session) -> None:
     game_state = db.query(GameState).filter(GameState.id == 1).first()
     if game_state is None:
         raise ValueError("Game state does not exist")
 
+    # Clear all transactional data
+    db.query(DemandOrder).delete()
+    db.query(ManufacturingOrder).delete()
+    db.query(PurchaseOrder).delete()
+    db.query(Event).delete()
+
+    # Reset inventory to 150 units each
+    for inv in db.query(Inventory).all():
+        inv.quantity = 150.0
+        inv.reserved_quantity = 0.0
+
+    # Reset game state
     game_state.current_day = 1
     game_state.wallet_balance = 10000.0
     game_state.days_with_negative_balance = 0
     game_state.game_over = False
     game_state.last_updated = datetime.utcnow()
+
     db.commit()

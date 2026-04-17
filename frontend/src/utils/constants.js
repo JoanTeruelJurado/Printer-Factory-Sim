@@ -58,6 +58,11 @@ export const API_ENDPOINTS = {
     advanceDay: '/game/advance-day',
     reset: '/game/reset',
     inventory: '/game/inventory',
+    products: '/game/products',
+    events: '/game/events',
+    demandOrders: '/game/demand-orders',
+    finishedGoods: '/game/finished-goods',
+    fulfillDemand: (id) => `/game/demand-orders/${id}/fulfill`,
   },
   manufacturing: {
     list: '/manufacturing-orders',

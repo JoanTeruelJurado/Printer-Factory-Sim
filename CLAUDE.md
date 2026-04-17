@@ -6,10 +6,9 @@ A discrete-event simulation system that models the full production cycle of a fa
 ## Tech Stack
 - **Python 3.11+** - Readability, extensive libraries, cross-platform
 - **FastAPI + Pydantic** - REST API with automatic OpenAPI documentation
-- **Vanilla HTML/CSS/JavaScript** - Simple web frontend, no build tools required
+- **React 19 + Vite 5 + TailwindCSS v3** - Frontend SPA (replaces legacy static HTML)
 - **SQLite** - ACID-compliant persistence with easy backup/export
 - **Custom discrete-event loop** - Turn-based day progression (chosen over SimPy for explicit day boundaries)
-- **matplotlib** - Chart generation (embedded as base64 PNG in API responses)
 
 ## Architecture
 
@@ -36,7 +35,7 @@ A discrete-event simulation system that models the full production cycle of a fa
 ### Key Architecture Decisions
 
 1. **Custom Simulation Engine**: Rather than SimPy's continuous event queue, we use a turn-based day progression. Day boundaries are explicit game mechanics where:
-   - Demand is generated
+   - Demand is generated (1-2 orders/day randomly)
    - Purchase orders arrive
    - Production processes up to capacity
    - Costs are calculated
@@ -47,6 +46,12 @@ A discrete-event simulation system that models the full production cycle of a fa
 3. **Singleton Game State**: Only one game instance exists at a time. `game_state` table has `id = 1` constraint.
 
 4. **Event-Sourced Logging**: All state changes logged to `events` table with JSON details. Enables audit trails, replay, analytics.
+
+5. **Manual Demand Fulfillment**: Revenue is NOT automatically collected on day advance. The player must manually serve each demand order via the UI. Orders served on or before due date earn full revenue; orders served late earn nothing. Expired unfulfilled orders are marked as lost with a penalty.
+
+6. **Finished Goods Accounting**: Available stock = completed MO quantities − already-fulfilled demand quantities (computed on-the-fly, no separate inventory table for finished goods).
+
+7. **React SPA Frontend**: The active frontend is `frontend/` (React + Vite), served on port 5173 with a `/api` proxy to the FastAPI backend on port 8000. The legacy `app/static/` HTML files are unused.
 
 5. **Material Reservation Model**: When order is released, materials are "reserved" (not immediately consumed). Consumed when production completes. Prevents overselling same material to multiple orders.
 

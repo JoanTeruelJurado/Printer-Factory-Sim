@@ -15,7 +15,7 @@ export const useGameState = () => {
   const fetchGameState = useCallback(async () => {
     try {
       const response = await request('GET', API_ENDPOINTS.game.state);
-      setGameState(response.data);
+      setGameState(response);
       setError(null);
     } catch (err) {
       setError(err.message);

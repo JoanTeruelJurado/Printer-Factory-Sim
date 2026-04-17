@@ -29,7 +29,7 @@ function AppContent() {
     );
   }
 
-  if (error) {
+  if (error && !gameState) {
     return (
       <div className="flex items-center justify-center h-screen">
         <div className="text-center">

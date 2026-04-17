@@ -2,14 +2,14 @@
  * useAPI - Custom hook for API communication
  */
 
-import { useState } from 'react';
+import { useState, useCallback } from 'react';
 import API from '../utils/api';
 
 export const useAPI = () => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
 
-  const request = async (method, endpoint, data = null) => {
+  const request = useCallback(async (method, endpoint, data = null) => {
     setLoading(true);
     setError(null);
     try {
@@ -30,7 +30,7 @@ export const useAPI = () => {
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
   return { request, loading, error };
 };
