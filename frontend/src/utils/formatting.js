@@ -7,7 +7,7 @@ export const formatCurrency = (amount) => {
     style: 'currency',
     currency: 'EUR',
     minimumFractionDigits: 0,
-  }).format(amount);
+  }).format(amount ?? 0);
 };
 
 export const formatDate = (date) => {

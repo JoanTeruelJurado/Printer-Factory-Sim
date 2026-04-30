@@ -1,4 +1,5 @@
 import { useAPI } from '../../hooks/useAPI';
+import { useLocalStorage } from '../../hooks/useLocalStorage';
 import { useState, useEffect, useCallback } from 'react';
 import { API_ENDPOINTS } from '../../utils/constants';
 import { formatCurrency } from '../../utils/formatting';
@@ -48,17 +49,22 @@ const GameTab = ({ gameState, onRefresh, onToast }) => {
   const [servingId, setServingId] = useState(null); // demand_id currently being served
   const [shortageModal, setShortageModal] = useState(null); // { order, shortages }
   const [finishedGoods, setFinishedGoods] = useState({}); // { product_id: available_qty }
+  const [products, setProducts] = useState([]); // finished product catalog
+  const [demandMoMap, setDemandMoMap] = useLocalStorage('printer-sim-demand-mo-map', {}); // { demand_id: mo_order_id }
+  const [todayRevenue, setTodayRevenue] = useState(0); // revenue collected this day
 
   const loadData = useCallback(async () => {
     try {
-      const [demands, mos, goods] = await Promise.all([
+      const [demands, mos, goods, prods] = await Promise.all([
         request('GET', API_ENDPOINTS.game.demandOrders),
         request('GET', API_ENDPOINTS.manufacturing.list),
         request('GET', API_ENDPOINTS.game.finishedGoods),
+        request('GET', API_ENDPOINTS.game.products),
       ]);
       setDemandOrders(demands);
       setActiveOrders(mos.filter(o => o.status === 'pending' || o.status === 'released'));
       setFinishedGoods(goods || {});
+      setProducts(prods || []);
     } catch (e) {
       // silently fail
     }
@@ -75,7 +81,10 @@ const GameTab = ({ gameState, onRefresh, onToast }) => {
       const result = await request('POST', API_ENDPOINTS.game.advanceDay);
       await onRefresh();
       await loadDemandOrders();
-      setLastDayResult(result?.data || result);
+      const dayResult = result?.data || result;
+      setLastDayResult({ ...dayResult, revenue: todayRevenue });
+      setTodayRevenue(0);
+      setDemandMoMap({});
       setShowAdvanceModal(false);
       onToast(`Day advanced — ${result?.data?.demands_created ?? result?.demands_created ?? 0} new demand orders`, 'success');
     } catch (error) {
@@ -86,10 +95,9 @@ const GameTab = ({ gameState, onRefresh, onToast }) => {
   const handleProduce = async (order) => {
     setProducingId(order.demand_id);
     try {
-      // Create MO for 1 unit
       const mo = await request('POST', API_ENDPOINTS.manufacturing.create, {
         product_id: order.product_id,
-        quantity: 1,
+        quantity: order.quantity,
       });
 
       // Check BOM for shortages
@@ -99,8 +107,9 @@ const GameTab = ({ gameState, onRefresh, onToast }) => {
         await request('PUT', API_ENDPOINTS.manufacturing.cancel(mo.order_id));
         setShortageModal({ order, shortages });
       } else {
-        await request('PUT', API_ENDPOINTS.manufacturing.release(mo.order_id), { quantity: 1 });
-        onToast(`Production started: 1× ${order.product_name}`, 'success');
+        await request('PUT', API_ENDPOINTS.manufacturing.release(mo.order_id), { quantity: order.quantity });
+        setDemandMoMap(prev => ({ ...prev, [order.demand_id]: mo.order_id }));
+        onToast(`Production started: ${order.quantity}× ${order.product_name}`, 'success');
         await loadData();
         onRefresh();
       }
@@ -116,6 +125,7 @@ const GameTab = ({ gameState, onRefresh, onToast }) => {
     try {
       const result = await request('POST', API_ENDPOINTS.game.fulfillDemand(order.demand_id));
       if (result.on_time) {
+        setTodayRevenue(prev => prev + (result.revenue ?? 0));
         onToast(`Served ${result.qty_served}× ${order.product_name} — +${formatCurrency(result.revenue)}`, 'success');
       } else {
         onToast(`Served late — no revenue for ${order.product_name}`, 'error');
@@ -129,8 +139,8 @@ const GameTab = ({ gameState, onRefresh, onToast }) => {
     }
   };
 
-  const openOrders = demandOrders.filter(d => d.status === 'open');
-  const closedOrders = demandOrders.filter(d => d.status !== 'open');
+  const openOrders = demandOrders.filter(d => d.status === 'open' || d.status === 'partial');
+  const closedOrders = demandOrders.filter(d => d.status !== 'open' && d.status !== 'partial');
 
   return (
     <div className="space-y-6">
@@ -185,6 +195,25 @@ const GameTab = ({ gameState, onRefresh, onToast }) => {
         </div>
       )}
 
+      {/* Finished Goods Stock */}
+      {products.length > 0 && (
+        <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4">
+          <p className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-3">Finished Goods Stock</p>
+          <div className="grid grid-cols-3 gap-3">
+            {products.map(p => {
+              const qty = finishedGoods[String(p.product_id)] ?? finishedGoods[p.product_id] ?? 0;
+              return (
+                <div key={p.product_id} className="text-center">
+                  <p className="text-xs text-gray-500 dark:text-gray-400 truncate">{p.product_name}</p>
+                  <p className={`text-2xl font-bold ${qty > 0 ? 'text-green-600' : 'text-gray-400'}`}>{qty}</p>
+                  <p className="text-xs text-gray-400">units</p>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       {/* Advance Day Button */}
       <button
         onClick={() => setShowAdvanceModal(true)}
@@ -229,10 +258,14 @@ const GameTab = ({ gameState, onRefresh, onToast }) => {
                 const urgent = daysLeft <= 1;
                 const isProcessing = producingId === order.demand_id;
                 const isServing = servingId === order.demand_id;
-                const inProduction = activeOrders.some(mo => mo.product_id === order.product_id);
+                const linkedMoId = demandMoMap[order.demand_id];
+                const inProduction = linkedMoId != null && activeOrders.some(mo => mo.order_id === linkedMoId);
                 const availableStock = finishedGoods[String(order.product_id)] ?? finishedGoods[order.product_id] ?? 0;
-                const canServe = availableStock > 0;
+                const remaining = order.quantity - (order.fulfilled_qty ?? 0);
                 const isLate = currentDay > order.due_day;
+                const canServe = availableStock > 0 && !isLate;
+                const isFull = availableStock >= remaining;
+                const isPartial = canServe && !isFull;
                 return (
                   <tr
                     key={order.demand_id}
@@ -241,9 +274,13 @@ const GameTab = ({ gameState, onRefresh, onToast }) => {
                     <td className="px-4 py-3 font-medium">
                       {order.product_name}
                       {urgent && !isLate && <span className="ml-2 text-xs text-red-500 font-normal">⚠ Urgent</span>}
-                      {isLate && <span className="ml-2 text-xs text-red-600 font-semibold">LATE</span>}
+                      {isLate && <span className="ml-2 text-xs text-red-600 font-semibold">EXPIRED</span>}
                     </td>
-                    <td className="px-4 py-3 text-right">{order.quantity}</td>
+                    <td className="px-4 py-3 text-right">
+                      {order.fulfilled_qty > 0
+                        ? <span>{order.fulfilled_qty}<span className="text-gray-400">/{order.quantity}</span></span>
+                        : order.quantity}
+                    </td>
                     <td className="px-4 py-3 text-center text-gray-500">Day {order.request_day}</td>
                     <td className={`px-4 py-3 text-center font-medium ${urgent ? 'text-red-500' : 'text-gray-700 dark:text-gray-300'}`}>
                       Day {order.due_day}
@@ -255,14 +292,18 @@ const GameTab = ({ gameState, onRefresh, onToast }) => {
                       </span>
                     </td>
                     <td className="px-4 py-3 text-center">
-                      {canServe ? (
+                      {isLate ? (
+                        <span className="px-3 py-1 text-xs font-medium bg-gray-100 text-gray-500 dark:bg-gray-700 dark:text-gray-400 rounded-lg">
+                          Expired
+                        </span>
+                      ) : canServe ? (
                         <button
                           onClick={() => handleServe(order)}
                           disabled={isServing || loading}
-                          className={`px-3 py-1 text-xs font-medium text-white rounded-lg transition ${isLate ? 'bg-orange-500 hover:bg-orange-600' : 'bg-emerald-600 hover:bg-emerald-700'} disabled:bg-gray-400`}
-                          title={isLate ? 'Serve late (no revenue)' : 'Serve order and collect revenue'}
+                          className={`px-3 py-1 text-xs font-medium text-white rounded-lg transition disabled:bg-gray-400 ${isFull ? 'bg-emerald-600 hover:bg-emerald-700' : 'bg-amber-500 hover:bg-amber-600'}`}
+                          title={isFull ? 'Serve full order' : `Partial: ${availableStock} of ${remaining} available`}
                         >
-                          {isServing ? '⏳' : isLate ? '⚠ Serve (late)' : '✓ Serve'}
+                          {isServing ? '⏳' : isFull ? '✓ Serve' : `◑ Partial (${availableStock}/${remaining})`}
                         </button>
                       ) : inProduction ? (
                         <span className="inline-flex items-center gap-1 px-3 py-1 text-xs font-medium bg-purple-100 text-purple-700 dark:bg-purple-900 dark:text-purple-300 rounded-lg">
@@ -274,7 +315,7 @@ const GameTab = ({ gameState, onRefresh, onToast }) => {
                           onClick={() => handleProduce(order)}
                           disabled={isProcessing || loading}
                           className="px-3 py-1 text-xs font-medium bg-green-600 hover:bg-green-700 disabled:bg-gray-400 text-white rounded-lg transition"
-                          title="Produce 1 unit of this product"
+                          title={`Produce ${remaining} units`}
                         >
                           {isProcessing ? '⏳' : '▶ Produce'}
                         </button>

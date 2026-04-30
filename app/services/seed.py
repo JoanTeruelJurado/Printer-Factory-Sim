@@ -225,7 +225,7 @@ from datetime import datetime
 from app.db.models import DemandOrder, Event, ManufacturingOrder, PurchaseOrder
 
 
-def reset_game(db: Session) -> None:
+def reset_game(db: Session, daily_production_capacity: int = 10, starting_wallet: float = 10000.0) -> None:
     game_state = db.query(GameState).filter(GameState.id == 1).first()
     if game_state is None:
         raise ValueError("Game state does not exist")
@@ -243,7 +243,8 @@ def reset_game(db: Session) -> None:
 
     # Reset game state
     game_state.current_day = 1
-    game_state.wallet_balance = 10000.0
+    game_state.wallet_balance = starting_wallet
+    game_state.daily_production_capacity = daily_production_capacity
     game_state.days_with_negative_balance = 0
     game_state.game_over = False
     game_state.last_updated = datetime.utcnow()

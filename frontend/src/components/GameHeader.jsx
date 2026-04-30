@@ -11,10 +11,11 @@ const GameHeader = ({ gameState, onRefresh }) => {
   const [refreshing, setRefreshing] = useState(false);
   const [showResetModal, setShowResetModal] = useState(false);
   const [resetting, setResetting] = useState(false);
+  const [resetConfig, setResetConfig] = useState({ daily_production_capacity: 10, starting_wallet: 10000 });
 
   if (!gameState) return null;
 
-  const { current_day, wallet_balance, warehouse_capacity, warehouse_used, game_over } = gameState;
+  const { current_day, wallet_balance, warehouse_capacity, warehouse_used, daily_production_capacity, production_used_today, game_over } = gameState;
   const capacityPercent = warehouse_capacity > 0 ? (warehouse_used / warehouse_capacity) * 100 : 0;
 
   const handleRefresh = async () => {
@@ -26,7 +27,8 @@ const GameHeader = ({ gameState, onRefresh }) => {
   const handleReset = async () => {
     setResetting(true);
     try {
-      await request('POST', API_ENDPOINTS.game.reset);
+      await request('POST', API_ENDPOINTS.game.reset, resetConfig);
+      localStorage.removeItem('printer-sim-demand-mo-map');
       await onRefresh();
       setShowResetModal(false);
       window.location.reload();
@@ -54,6 +56,14 @@ const GameHeader = ({ gameState, onRefresh }) => {
                 <p className={`text-2xl font-bold ${wallet_balance < 0 ? 'text-red-600' : wallet_balance < 5000 ? 'text-yellow-600' : 'text-green-600'}`}>
                   {formatCurrency(wallet_balance)}
                 </p>
+              </div>
+
+              <div>
+                <p className="text-sm text-gray-500 dark:text-gray-400">Production</p>
+                <p className={`text-2xl font-bold ${production_used_today >= daily_production_capacity ? 'text-red-600' : production_used_today > 0 ? 'text-yellow-600' : 'text-purple-600'}`}>
+                  {production_used_today ?? 0}/{daily_production_capacity ?? 0}
+                </p>
+                <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">units today</p>
               </div>
 
               <div>
@@ -113,9 +123,37 @@ const GameHeader = ({ gameState, onRefresh }) => {
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
           <div className="bg-white dark:bg-gray-800 p-6 rounded-lg max-w-sm w-full mx-4 shadow-xl">
             <h3 className="text-xl font-bold mb-2 text-red-600">Start New Game?</h3>
-            <p className="text-gray-600 dark:text-gray-400 mb-6">
-              This will reset everything — wallet, inventory, all orders, and event history. Day 1, €10,000.
+            <p className="text-gray-600 dark:text-gray-400 mb-4">
+              Configure your game parameters before starting.
             </p>
+            <div className="space-y-3 mb-6">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                  Starting Wallet (€)
+                </label>
+                <input
+                  type="number"
+                  min="0"
+                  step="1000"
+                  value={resetConfig.starting_wallet}
+                  onChange={e => setResetConfig(c => ({ ...c, starting_wallet: Number(e.target.value) }))}
+                  className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                  Daily Production Capacity (units/day)
+                </label>
+                <input
+                  type="number"
+                  min="1"
+                  max="500"
+                  value={resetConfig.daily_production_capacity}
+                  onChange={e => setResetConfig(c => ({ ...c, daily_production_capacity: Number(e.target.value) }))}
+                  className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100"
+                />
+              </div>
+            </div>
             <div className="flex gap-3">
               <button
                 onClick={() => setShowResetModal(false)}

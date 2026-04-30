@@ -1,11 +1,19 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException
+from pydantic import BaseModel, Field
+from sqlalchemy import func
 from sqlalchemy.orm import Session
+from typing import Optional
 
 from app.db.database import get_db
 from app.db.models import Config, DemandOrder, Event, GameState, Inventory, ManufacturingOrder, Product
 from app.schemas import GameStateResponse, InventoryItemResponse
 from app.services.seed import reset_game
 from app.services.simulation import advance_day, SimulationError
+
+
+class ResetConfig(BaseModel):
+    daily_production_capacity: int = Field(default=10, ge=1, le=500)
+    starting_wallet: float = Field(default=10000.0, ge=0.0)
 
 router = APIRouter()
 
@@ -31,13 +39,18 @@ def get_game_state(db: Session = Depends(get_db)) -> GameStateResponse:
         except ValueError:
             pass
 
+    released_qty = db.query(func.sum(ManufacturingOrder.remaining_qty)).filter(
+        ManufacturingOrder.status == "released"
+    ).scalar() or 0
+    production_used_today = min(int(released_qty), state.daily_production_capacity)
+
     return GameStateResponse(
         current_day=state.current_day,
         wallet_balance=state.wallet_balance,
         warehouse_capacity=state.warehouse_capacity,
         warehouse_used=total_used,
         daily_production_capacity=state.daily_production_capacity,
-        production_used_today=0,
+        production_used_today=production_used_today,
         game_over=state.game_over,
         warning_level=warning_level,
     )
@@ -62,8 +75,12 @@ def list_inventory(db: Session = Depends(get_db)) -> list[InventoryItemResponse]
 
 
 @router.post("/reset")
-def reset_game_state(db: Session = Depends(get_db)) -> dict:
-    reset_game(db)
+def reset_game_state(
+    config: Optional[ResetConfig] = Body(default=None),
+    db: Session = Depends(get_db),
+) -> dict:
+    cfg = config or ResetConfig()
+    reset_game(db, daily_production_capacity=cfg.daily_production_capacity, starting_wallet=cfg.starting_wallet)
     return {"success": True, "message": "Game reset to initial state."}
 
 
