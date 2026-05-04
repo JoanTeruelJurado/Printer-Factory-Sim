@@ -1,34 +1,77 @@
 # 3D Printer Factory Simulator
 
-A FastAPI-based discrete-event simulation of a 3D printer production factory.
+A discrete-event simulation of a 3D printer production factory. You play as production planner — managing inventory, purchasing materials, scheduling manufacturing orders, and fulfilling customer demand before your wallet runs dry.
 
-## Getting started
+## Tech Stack
 
-1. Create a Python environment:
-   ```bash
-   python3 -m venv .venv
-   source .venv/bin/activate
-   pip install -r requirements.txt
-   ```
+- **Backend**: Python 3.11 + FastAPI + SQLAlchemy + SQLite
+- **Frontend**: React 19 + Vite 5 + TailwindCSS v3
 
-2. Run the server:
-   ```bash
-   uvicorn app.main:app --reload
-   ```
+## Getting Started
 
-3. Open the API docs:
-   - http://127.0.0.1:8000/docs
-   - http://127.0.0.1:8000/redoc
+### 1. Backend
 
-## Project layout
+```bash
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+```
 
-- `app/main.py` - FastAPI application entrypoint
-- `app/db/database.py` - SQLite engine and session management
-- `app/db/models.py` - SQLAlchemy ORM schema
-- `app/api/game.py` - game management endpoints
-- `app/services/seed.py` - initial data seeding
+### 2. Frontend
 
-## Notes
+```bash
+cd frontend
+npm install
+npm run dev -- --host 0.0.0.0 --port 5173
+```
 
-- The application uses `sqlite:///./simulator.db` by default unless `DATABASE_URL` is set.
-- The database schema is created automatically on startup.
+### 3. Open in browser
+
+| Service | URL |
+|---------|-----|
+| Game UI | http://localhost:5173 |
+| API docs | http://localhost:8000/docs |
+
+> If running on a remote VM (e.g. Multipass), replace `localhost` with the VM's IP address.
+
+## Project Layout
+
+```
+app/
+  main.py              # FastAPI app entrypoint
+  db/
+    database.py        # SQLite engine and session management
+    models.py          # SQLAlchemy ORM models (14 tables)
+  schemas/             # Pydantic request/response models
+  services/
+    simulation.py      # Core discrete-event engine (advance_day)
+    production.py      # Manufacturing order logic
+    purchasing.py      # Purchase order + supplier pricing
+    inventory.py       # Material reservation and consumption
+    demand.py          # Demand generation
+    seed.py            # Initial data seeding
+  api/
+    game.py            # Game state + day advancement endpoints
+    orders.py          # Manufacturing + purchase order endpoints
+    products.py        # Product and supplier endpoints
+frontend/              # React SPA (Vite dev server, proxies /api → :8000)
+simulator.db           # SQLite database (auto-created on first run)
+```
+
+## Gameplay
+
+- Each **day advance** generates new customer demand, processes production, delivers purchased materials, and deducts daily costs.
+- You must **manually serve demand orders** before their due date to earn revenue.
+- **Prices fluctuate ±10% daily** — buy materials strategically.
+- The game ends if your **wallet goes negative**.
+
+## Configuration
+
+Set environment variables in a `.env` file at the project root:
+
+```env
+DATABASE_URL=sqlite:///./simulator.db
+STARTING_WALLET=10000
+DAILY_PRODUCTION_CAPACITY=10
+```
