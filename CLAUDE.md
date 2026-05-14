@@ -1,319 +1,319 @@
 # Project: 3D Printer Production Simulator
 
 ## What This Is
-A discrete-event simulation system that models the full production cycle of a factory manufacturing 3D printers. The user acts as production planner, making decisions about what to manufacture and what materials to purchase while managing inventory, costs, and production capacity. The game ends if wallet goes negative, creating tension between demand, inventory, capacity, and lead times.
+A discrete-event simulation system that models the full production cycle of a factory manufacturing 3D printers. The user acts as production planner, making decisions about what to manufacture and what materials to purchase while managing inventory, costs, and production capacity. The game ends if the wallet goes negative for 3 consecutive days.
 
 ## Tech Stack
-- **Python 3.11+** - Readability, extensive libraries, cross-platform
-- **FastAPI + Pydantic** - REST API with automatic OpenAPI documentation
-- **React 19 + Vite 5 + TailwindCSS v3** - Frontend SPA (replaces legacy static HTML)
-- **SQLite** - ACID-compliant persistence with easy backup/export
-- **Custom discrete-event loop** - Turn-based day progression (chosen over SimPy for explicit day boundaries)
+- **Python 3.12** — Factory API + Supplier API
+- **FastAPI + Pydantic v2** — REST API with automatic OpenAPI documentation
+- **React 19 + Vite 5 + TailwindCSS v3** — Frontend SPA, built and served by the Factory API
+- **SQLite** — Two separate databases: `simulator.db` (factory) and `supplier.db` (supplier)
+- **SQLAlchemy ORM** — Database access layer
+- **httpx** — Synchronous HTTP client used by `supplier_client.py`
+- **pytest + httpx** — Test suite (98 tests)
+- **Custom discrete-event loop** — Turn-based day progression
 
 ## Architecture
 
-### Layer Structure
+### Two-Server Design
+
 ```
-┌─────────────────────────────────────────┐
-│          Frontend (static)              │
-│    vanilla JS + Fetch API + CSS        │
-├─────────────────────────────────────────┤
-│            FastAPI Backend              │
-│  ┌─────────────┬───────────────────┐   │
-│  │   Routes    │  Schemas (Pydantic)│   │
-│  ├─────────────┼───────────────────┤   │
-│  │  Services   │  (validation)     │   │
-│  ├─────────────┼───────────────────┤   │
-│  │ Simulation  │                   │   │
-│  └─────────────┴───────────────────┘   │
-├─────────────────────────────────────────┤
-│           SQLite Database               │
-│         (via SQLAlchemy ORM)            │
-└─────────────────────────────────────────┘
+Browser
+  │
+  ▼
+Factory API :8000  (FastAPI + SQLite: simulator.db)
+  │  serves React build at /
+  │  exposes /api/* routes
+  │
+  ├── /api/game/*                   game state, advance day, export/import
+  ├── /api/manufacturing-orders/*   MO lifecycle
+  └── /api/suppliers, /api/purchase-orders
+           │
+           ▼  HTTP via supplier_client.py
+      Supplier API :8001  (FastAPI + SQLite: supplier.db)
+           │
+           ├── GET  /suppliers
+           ├── GET  /suppliers/{id}/catalog
+           ├── GET  /suppliers/{id}/pricing/{material_id}
+           ├── POST /orders
+           ├── GET  /orders
+           ├── GET  /orders/due?day=N
+           ├── PUT  /orders/{id}/deliver
+           ├── POST /prices/fluctuate
+           └── DELETE /orders
 ```
+
+The Factory API never touches supplier.db directly. All supplier/pricing/PO data goes through the Supplier API via `app/services/supplier_client.py`.
 
 ### Key Architecture Decisions
 
-1. **Custom Simulation Engine**: Rather than SimPy's continuous event queue, we use a turn-based day progression. Day boundaries are explicit game mechanics where:
-   - Demand is generated (1-2 orders/day randomly)
-   - Purchase orders arrive
-   - Production processes up to capacity
-   - Costs are calculated
-   - All events are logged
+1. **Two-Server Split**: Supplier logic (catalog, pricing, purchase orders) lives in a standalone FastAPI app (`supplier_api/`) with its own SQLite DB. The factory communicates via HTTP through `supplier_client.py`. This keeps the factory decoupled from supplier internals.
 
-2. **Service Layer Pattern**: Business logic is isolated from routes. Simulation rules live in services, making them testable without HTTP overhead.
+2. **supplier_client.py**: Thin HTTP wrapper around all Supplier API calls. Raises `SupplierAPIError` on connection failure. Both `process_purchase_deliveries` and `apply_daily_price_fluctuation` degrade gracefully if the Supplier API is down.
 
-3. **Singleton Game State**: Only one game instance exists at a time. `game_state` table has `id = 1` constraint.
+3. **React SPA served by FastAPI**: The React build (`frontend/dist/`) is served as static files by the Factory API. No separate dev server in production. `spa_fallback` route returns `index.html` for all non-API paths.
 
-4. **Event-Sourced Logging**: All state changes logged to `events` table with JSON details. Enables audit trails, replay, analytics.
+4. **Custom Simulation Engine**: Turn-based day progression with explicit boundaries. Each `advance_day()` call runs: price fluctuation → demand generation → purchase deliveries → production → expire demands + apply penalties → deduct costs → game-over check.
 
-5. **Manual Demand Fulfillment**: Revenue is NOT automatically collected on day advance. The player must manually serve each demand order via the UI. Orders served on or before due date earn full revenue; orders served late earn nothing. Expired unfulfilled orders are marked as lost with a penalty.
+5. **Service Layer Pattern**: Routes handle HTTP; services handle business logic. Testable without HTTP overhead.
 
-6. **Finished Goods Accounting**: Available stock = completed MO quantities − already-fulfilled demand quantities (computed on-the-fly, no separate inventory table for finished goods).
+6. **Singleton Game State**: Only one game instance at a time. `game_state` table has `id = 1`.
 
-7. **React SPA Frontend**: The active frontend is `frontend/` (React + Vite), served on port 5173 with a `/api` proxy to the FastAPI backend on port 8000. The legacy `app/static/` HTML files are unused.
+7. **Event-Sourced Logging**: All state changes logged to `events` table with JSON `details`. 14+ event types.
 
-5. **Material Reservation Model**: When order is released, materials are "reserved" (not immediately consumed). Consumed when production completes. Prevents overselling same material to multiple orders.
+8. **Manual Demand Fulfillment**: Revenue is NOT collected automatically. The player must serve each demand order via the UI. On-time → full revenue. Late → no revenue. Expired → €50/unit penalty deducted from wallet.
 
-6. **Daily Price Fluctuation**: Supplier prices vary ±10% daily. Stored as `daily_price_factor` recalculated each day start.
+9. **Finished Goods Accounting**: Available stock = sum of completed MO quantities − already-fulfilled demand quantities. Computed on-the-fly; no separate finished-goods table.
 
-7. **Partial Order Handling**: Manufacturing orders can be partially released and partially completed. `remaining_qty` tracks progress.
+10. **Material Reservation Model**: Materials are reserved when an MO is released (not consumed). Consumed when production completes. Unreserved on cancel. Prevents double-allocation.
+
+11. **Daily Price Fluctuation**: Supplier API recalculates `daily_price_factor` (±10%) on each `POST /prices/fluctuate` call, triggered at the start of every `advance_day`.
+
+12. **Partial Order Handling**: Release N < MO.quantity → splits into a new released MO (N units) + the original shrinks to (quantity − N). `remaining_qty` tracks production progress.
+
+## File Structure
+
+```
+app/                          # Factory API
+  main.py                     # FastAPI app; serves React build + /api/* routes
+  db/
+    database.py               # Engine, SessionLocal, Base, get_db, init_db
+    models.py                 # ORM: GameState, DailyCosts, Config, Client,
+                              #   Product, RawMaterial, BOM, Inventory,
+                              #   ManufacturingOrder, DemandOrder, Event
+  schemas/
+    __init__.py
+    inventory.py              # InventoryItemResponse
+    manufacturing.py          # ManufacturingOrderResponse, BOMLineResponse, etc.
+    order.py                  # GameStateResponse
+  services/
+    simulation.py             # advance_day(), generate_demand_orders(),
+                              #   process_production(), mark_expired_demands(),
+                              #   calculate_daily_costs(), check_game_over()
+    production.py             # create_mo(), release_mo(), cancel_mo()
+    purchasing.py             # issue_purchase_order(), list_suppliers(),
+                              #   get_supplier_catalog(), list_purchase_orders()
+    inventory.py              # reserve_materials(), consume_materials(),
+                              #   unreserve_materials(), check_material_availability()
+    supplier_client.py        # HTTP client for Supplier API (httpx, sync)
+    seed.py                   # seed_initial_data(), reset_game()
+  api/
+    game.py                   # /api/game/* endpoints
+    manufacturing.py          # /api/manufacturing-orders/* endpoints
+    purchasing.py             # /api/suppliers/*, /api/purchase-orders endpoints
+
+supplier_api/                 # Supplier API (standalone, port 8001)
+  main.py                     # FastAPI app; calls init_db() + seed() on startup
+  database.py                 # Engine for supplier.db
+  models.py                   # Supplier, SupplierProduct, PurchaseOrder
+  routes.py                   # All 9 supplier endpoints
+  seed.py                     # 3 suppliers, 8 materials, 24 SupplierProduct links
+
+frontend/
+  src/
+    components/               # React components
+    utils/                    # api.js helpers, constants.js
+  dist/                       # Production build (served by FastAPI)
+
+tests/
+  conftest.py                 # StaticPool in-memory SQLite; supplier_client autouse mock;
+                              #   engine/db/client fixtures
+  test_inventory.py           # 12 tests: reserve, consume, unreserve, availability
+  test_production.py          # 14 tests: create, full/partial release, cancel+unreserve
+  test_purchasing.py          # 12 tests: issue PO, wallet/capacity constraints, catalog
+  test_simulation.py          # 17 tests: demand gen, expiry+penalty, costs, game over
+  test_api.py                 # 43 tests: all HTTP endpoints (integration)
+
+start.sh                      # Builds frontend → starts Supplier API → starts Factory API
+stop.sh                       # Kills all services
+pytest.ini                    # testpaths = tests, asyncio_mode = auto
+```
 
 ## Data Model
 
-### Core Entities
-| Entity | Purpose | Key Relationships |
-|--------|---------|-------------------|
-| `products` | Finished printers + raw materials | BOM references products (finished) |
-| `raw_materials` | Purchasable inputs | BOM references materials |
-| `bom` | Material requirements per product | Links products ↔ materials |
-| `clients` | Demand sources (randomly generated) | Creates demand_orders |
-| `suppliers` | Material sources | Supplies via supplier_products |
-| `inventory` | Current stock levels | Tracks all raw_materials |
-| `manufacturing_orders` | Production work orders | References products |
-| `demand_orders` | Sales requests from clients | References products + clients |
-| `purchase_orders` | Supplier orders | References suppliers + materials |
-| `events` | Audit log of all actions | Timestamped, categorized |
-| `game_state` | Singleton: day, wallet, capacities | — |
+### Factory DB (simulator.db)
 
-### Critical Relationships
+| Table | Purpose |
+|-------|---------|
+| `game_state` | Singleton: current_day, wallet_balance, capacities, game_over |
+| `daily_costs` | Fixed cost, variable cost/unit, energy cost/hour, maintenance % |
+| `config` | Key-value runtime config (thresholds, defaults) |
+| `clients` | Demand sources (id=1 "Default Client") |
+| `products` | Finished printers (type=finished) |
+| `raw_materials` | Purchasable inputs with base_price, volume_per_unit |
+| `bom` | Bill of Materials: product × material × qty_needed |
+| `inventory` | quantity + reserved_quantity per material |
+| `manufacturing_orders` | Status: pending → released → completed / cancelled |
+| `demand_orders` | Status: open → partial / fulfilled / lost |
+| `events` | Append-only audit log (event_type, sim_day, category, details JSON) |
+
+### Supplier DB (supplier.db)
+
+| Table | Purpose |
+|-------|---------|
+| `suppliers` | name, lead_time_days, reliability |
+| `supplier_products` | supplier × material_id × base_unit_cost × daily_price_factor |
+| `purchase_orders` | All POs; status: pending → delivered |
+
+### Relationships
+
 ```
-Client → DemandOrder → (wait fulfillment) → ManufacturingOrder → Product
-                                                          ↓
-Supplier → PurchaseOrder → Inventory → BOM → (consume) ManufacturingOrder
+Client → DemandOrder
+Product → ManufacturingOrder, DemandOrder
+RawMaterial → BOM → Product
+RawMaterial → Inventory
+ManufacturingOrder → (BOM lookup) → Inventory (reserve/consume)
+
+[Supplier API]
+Supplier → SupplierProduct ← material_id (matches factory RawMaterial.id)
+Supplier → PurchaseOrder
 ```
+
+## Simulation Day Cycle
+
+```
+advance_day(db):
+  1. supplier_client.fluctuate_prices()          → Supplier API: POST /prices/fluctuate
+  2. generate_demand_orders(db, day)             → 1-2 random DemandOrders
+  3. supplier_client.get_due_orders(day)         → Supplier API: GET /orders/due?day=N
+     → update local Inventory.quantity
+     → supplier_client.deliver_order(id, day)    → Supplier API: PUT /orders/{id}/deliver
+  4. process_production(db, day)
+     → for each released MO (up to daily_production_capacity):
+        check BOM availability → consume materials → mark completed
+  5. mark_expired_demands(db, day)
+     → status="lost", penalty=€50×unfulfilled, deduct from wallet
+     → log DEMAND_EXPIRED + PENALTY_DEDUCTED events
+  6. calculate_daily_costs(db, day)              → deduct fixed_cost
+     → deduct production_stats["cost"] (variable + energy + maintenance)
+  7. check_game_over(db, day)
+     → wallet < 0: days_with_negative_balance++
+     → >= 3 consecutive: game_over = True
+  8. current_day += 1
+  9. db.commit()
+```
+
+## Business Rules
+
+| Rule | Value |
+|------|-------|
+| Starting wallet | €10,000 (configurable on reset) |
+| Daily fixed cost | €500 |
+| Variable cost per unit produced | €50 |
+| Energy cost per assembly hour | €10 |
+| Maintenance | 5% of total daily cost |
+| Late/lost demand penalty | €50 per unfulfilled unit |
+| Game over trigger | 3 consecutive days with negative wallet |
+| Default warehouse capacity | 10,000 units |
+| Default production capacity | 10 units/day (configurable on reset) |
+| Price fluctuation | ±10% daily (uniform random in [0.90, 1.10]) |
+| Demand orders per day | 1–2 (random) |
+| Demand due window | 3–7 days from request_day |
+
+## API Endpoints
+
+### Factory API (port 8000)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | /api/game/state | Game state (day, wallet, capacities) |
+| GET | /api/game/inventory | Inventory levels per material |
+| GET | /api/game/products | Active finished products |
+| GET | /api/game/demand-orders | Demand orders (optional ?status=) |
+| GET | /api/game/finished-goods | Available finished goods per product |
+| GET | /api/game/events | Event log (optional ?category=) |
+| POST | /api/game/advance-day | Advance simulation by one day |
+| POST | /api/game/demand-orders/{id}/fulfill | Manually serve a demand order |
+| GET | /api/game/export | Download full game snapshot as JSON |
+| POST | /api/game/import | Restore game from JSON snapshot |
+| POST | /api/game/reset | Reset to day 1 (optional config body) |
+| GET | /api/manufacturing-orders | List all MOs |
+| POST | /api/manufacturing-orders | Create new MO |
+| GET | /api/manufacturing-orders/{id} | Get MO with BOM detail |
+| PUT | /api/manufacturing-orders/{id}/release | Release MO to production |
+| PUT | /api/manufacturing-orders/{id}/cancel | Cancel MO (unreserves materials) |
+| GET | /api/suppliers | List suppliers (via Supplier API) |
+| GET | /api/suppliers/{id}/catalog | Catalog with current prices |
+| GET | /api/suppliers/{id}/pricing/{mat_id} | Single material pricing |
+| GET | /api/purchase-orders | List all POs (via Supplier API) |
+| POST | /api/purchase-orders | Issue new PO (wallet + capacity check) |
+
+### Supplier API (port 8001)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | /health | Health check |
+| GET | /suppliers | List all suppliers |
+| GET | /suppliers/{id}/catalog | Catalog with current prices |
+| GET | /suppliers/{id}/pricing/{mat_id} | Single material pricing |
+| POST | /orders | Create purchase order |
+| GET | /orders | List all orders |
+| GET | /orders/due?day=N | Orders due on or before day N |
+| PUT | /orders/{id}/deliver | Mark order as delivered |
+| POST | /prices/fluctuate | Apply ±10% price fluctuation |
+| DELETE | /orders | Delete all orders (used by game import/reset) |
 
 ## Coding Conventions
 
 ### Python
-- **Type hints everywhere** - Function signatures always typed
-- **Pydantic models** - All API request/response validation via Pydantic v2
-- **Service layer separation** - Routes handle HTTP; services handle business logic
-- **Docstrings** - Google-style for all public functions/classes
-- **Async/await** - Use `async def` for all route handlers; sync for simulation logic
-- **Error handling** - Custom exceptions (`InsufficientFundsError`, `CapacityExceededError`, etc.)
-- **File structure**:
-  ```
-  app/
-    __init__.py
-    main.py              # FastAPI app instantiation
-    db/
-      __init__.py
-      database.py        # SQLite connection, session management
-      models.py          # SQLAlchemy ORM models
-    schemas/             # Pydantic models
-      __init__.py
-      product.py
-      order.py
-      inventory.py
-      ...
-    services/            # Business logic
-      __init__.py
-      simulation.py      # Core simulation engine
-      production.py      # Manufacturing logic
-      purchasing.py      # Purchase order logic
-      demand.py          # Demand generation
-      wallet.py          # Financial calculations
-    api/                 # Route handlers
-      __init__.py
-      game.py
-      products.py
-      orders.py
-      ...
-    utils/
-      __init__.py
-      charts.py          # matplotlib helpers
-      validators.py
-  ```
+- Type hints on all function signatures
+- Pydantic v2 models for all API validation
+- Service layer separation: routes handle HTTP, services handle logic
+- Custom exceptions: `PurchasingError`, `SimulationError`, `InsufficientFundsError`, etc.
+- `supplier_client` calls degrade gracefully (catch `SupplierAPIError`, return 0/pass)
+
+### Tests
+- `StaticPool` in-memory SQLite so all connections share same DB
+- `mock_supplier_client` autouse fixture in `conftest.py` patches all `supplier_client.*` methods
+- `client` fixture patches `app.db.database.engine`, `SessionLocal`, `app.services.seed.SessionLocal`
+- No real HTTP calls in any test
 
 ### Frontend
-- **Single HTML file** for simplicity (or modular if needed)
-- **Fetch API** for all HTTP calls
-- **Base64-encoded PNGs** for chart display
-- **Auto-refresh** every 30 seconds via `setInterval`
-- **Modal dialogs** for complex forms (Bootstrap or custom)
+- React components in `frontend/src/components/`
+- All API calls via `fetch('/api/...')` — relative URL, same origin as the page
+- Built with `npm run build` → `frontend/dist/` served by FastAPI's `StaticFiles`
+- SPA fallback: all non-`/api` routes return `index.html`
 
-### API Conventions
-- **RESTful naming** - `/api/manufacturing-orders`, not `/api/orders`
-- **Standard response format**:
-  ```json
-  {
-    "success": true,
-    "data": { /* payload */ },
-    "message": null
-  }
-  ```
-- **Error responses**:
-  ```json
-  {
-    "success": false,
-    "data": null,
-    "message": "Insufficient funds: need €500, have €250",
-    "error_code": "INSUFFICIENT_FUNDS"
-  }
-  ```
-- **HTTP status codes** still used semantically (200 OK, 400 Bad Request, 403 Forbidden, 422 Validation, 500 Server Error)
+## Running Locally
 
-### Configuration
-- **Environment variables** via `.env` file (dotenv library):
-  ```env
-  DATABASE_URL=sqlite:///./simulator.db
-  STARTING_WALLET=10000
-  WAREHOUSE_CAPACITY=10000
-  DAILY_PRODUCTION_CAPACITY=10
-  ```
-- **Runtime config** stored in `config` table for editable settings
+```bash
+# One-time setup
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+cd frontend && npm install && cd ..
+
+# Launch
+./start.sh        # builds frontend, starts Supplier API + Factory API
+
+# Tests
+pytest tests/ -v  # 98 tests, ~4s
+
+# Stop
+./stop.sh
+```
 
 ## Current State
 
-### Phase 1: Foundation ✅ COMPLETE (80%)
-
-#### Completed ✅
-- [x] PRD document created (900+ lines, comprehensive spec)
-- [x] CLAUDE.md initialized with architecture decisions
-- [x] Project structure set up (FastAPI app with proper layout)
-- [x] Virtual environment & dependencies installed
-- [x] Database schema fully implemented (14 SQLAlchemy ORM tables)
-- [x] SQLite database initialization working
-- [x] Initial data seeding script created
-- [x] 3 finished products defined (Hobby, Prosumer, Industrial)
-- [x] 8 raw materials defined (filament, extrusions, motors, etc.)
-- [x] 3 suppliers configured with lead times & reliability
-- [x] GameState initialization (day 1, €10k wallet)
-- [x] DailyCosts configuration (€500 fixed, €50/unit, €10/hour)
-- [x] Core API endpoints working (6 endpoints, error handling)
-- [x] FastAPI app runs without errors
-- [x] Frontend skeleton created (5 HTML files)
-
-#### Data Gaps (Intentional - Phase 2) ⚠️
-- [ ] Bill of Materials (BOM) - defined in Phase 2 (p2-bom-data)
-- [ ] Supplier-material links (SupplierProduct) - defined in Phase 2
-- [ ] Initial inventory stock - loaded in Phase 2
-
-#### Not Yet Started ⏳
-- [ ] Simulation core (Phase 2)
-- [ ] Production service (Phase 2)
-- [ ] Purchasing service (Phase 2)
-- [ ] Manufacturing order management (Phase 2)
-- [ ] Event logging system (Phase 4)
-- [ ] Import/export functionality (Phase 4)
-- [ ] Frontend UI implementation (Phase 5)
-- [ ] Business rule enforcement (Phase 3)
-- [ ] Testing suite (Phase 6)
-
----
-
-### Phase 2: Core Simulation ✅ COMPLETE (11/11 items done)
-
-#### Completed ✅
-- [x] BOM data fully defined (20 BOM entries across 3 products)
-- [x] Supplier-material pricing set up (24 links with different pricing strategies)
-- [x] Initial inventory loaded (150 units of each material for testing)
-- [x] Simulation engine core (`app/services/simulation.py` - 620+ lines)
-  - advance_day() orchestrator function - fully atomic with transaction support
-  - Demand generation (0-5 random orders per day, configurable products)
-  - Production processing (materials consumed, goods produced up to capacity)
-  - Purchase deliveries (materials arrive based on lead time, added to inventory)
-  - Demand fulfillment (FIFO matching of finished goods to sales orders)
-  - Daily cost calculation (fixed + variable + energy + maintenance)
-  - Game over condition checking (wallet negative for 3+ days)
-  - Comprehensive event logging (all state changes logged with JSON details)
-- [x] Inventory service (`app/services/inventory.py` - 180+ lines)
-  - Material reservation system (reserve when order released)
-  - Material consumption (deduct from inventory when produced)
-  - Availability checking with shortage reporting
-  - Get available quantity (quantity - reserved)
-- [x] Manufacturing order management (`app/services/production.py` - 250+ lines)
-  - Create manufacturing orders with validation
-  - Release orders to production (with full material validation)
-  - Cancel orders (with material unreservation)
-  - Get material requirements with BOM details
-- [x] Manufacturing order API endpoints (5 endpoints fully functional)
-  - GET /api/manufacturing-orders - list all with BOM details
-  - POST /api/manufacturing-orders - create new order
-  - GET /api/manufacturing-orders/{id} - get order with full BOM
-  - PUT /api/manufacturing-orders/{id}/release - release to production
-  - PUT /api/manufacturing-orders/{id}/cancel - cancel order
-- [x] Purchasing service (`app/services/purchasing.py` - 290+ lines)
-  - Issue purchase orders with wallet & capacity validation
-  - Supplier catalog retrieval with daily price fluctuation
-  - Material pricing lookup
-  - Purchase order listing and tracking
-- [x] Purchase order API endpoints (5 endpoints fully functional)
-  - GET /api/suppliers - list all suppliers
-  - GET /api/suppliers/{id}/catalog - supplier catalog with current pricing
-  - GET /api/suppliers/{id}/pricing/{material_id} - specific material pricing
-  - GET /api/purchase-orders - list all purchase orders
-  - POST /api/purchase-orders - create new purchase order
-- [x] POST /api/game/advance-day - full day advancement endpoint (atomic, transactional)
-- [x] Event logging infrastructure (integrated into all state changes)
-- [x] Full Pydantic schemas for manufacturing, purchasing, inventory responses
-
-#### Testing ✅
-- [x] Manufacturing order creation, release, and cancellation
-- [x] Purchase order creation and pricing
-- [x] Day advancement with demand generation, production, and fulfillment
-- [x] Material reservation and consumption working correctly
-- [x] API endpoints tested and validated
-- [x] Full integration of simulation core with services
-
----
-
-### Phase 3: Business Rules ✅ COMPLETE
-
-#### Completed ✅
-- [x] Wallet constraint enforcement (purchasing blocks if insufficient funds)
-- [x] Warehouse capacity validation (fixed double-count bug: reserved is subset of quantity)
-- [x] Production capacity limiting (daily_production_capacity enforced in process_production)
-- [x] Material reservation system (reserve on release, unreserve on cancel)
-- [x] Partial order handling (splits order into released + pending remainder)
-- [x] Late delivery penalties (€50/unfulfilled unit deducted from wallet on expiry)
-- [x] Game over conditions (3 consecutive days with negative balance)
-
-#### Bug Fixes Applied ✅
-- [x] Missing Client record in seed (FK violation on demand generation)
-- [x] check_material_availability ignored reserved quantities (double-reservation bug)
-- [x] cancel_manufacturing_order didn't unreserve materials (added unreserve_materials())
-
----
-
-### Phase 4: Import/Export ✅ COMPLETE
-
-#### Completed ✅
-- [x] Event logging system (integrated throughout Phase 2, 14 event types)
-- [x] GET /api/game/export — full JSON snapshot (game_state, inventory, orders, events)
-- [x] POST /api/game/import — restore snapshot (wipes transactional data, restores all)
-- [x] Frontend Save/Load buttons in GameHeader (Download/Upload icons, file picker)
-
----
-
-### Phase 5: Frontend ✅ COMPLETE (95%)
-
-#### Completed ✅
-- [x] React 19 + Vite 5 + TailwindCSS SPA
-- [x] GameHeader: day, wallet, production, warehouse capacity, dark/light mode, Save/Load/New Game
-- [x] GameTab: demand orders, finished goods, advance day, serve demands, create+release MO
-- [x] OrdersTab: manufacturing orders CRUD, BOM view, partial release modal
-- [x] InventoryTab: raw materials, stock, reserved, available, warehouse bar
-- [x] SuppliersTab: supplier catalog with price fluctuation, purchase order creation and tracking
-- [x] EventsTab: event log with category filter, grouped by day
-- [x] Toast notifications, theme toggle
-
----
-
-### Phase 6: Testing ✅ COMPLETE
-
-#### Completed ✅
-- [x] pytest + httpx installed
-- [x] `tests/conftest.py` — in-memory SQLite (StaticPool), seeded fixtures, FastAPI TestClient with DB patching
-- [x] `tests/test_inventory.py` — 12 tests: reserve, consume, unreserve, availability check
-- [x] `tests/test_production.py` — 14 tests: create, full release, partial release (split), cancel + unreserve
-- [x] `tests/test_purchasing.py` — 12 tests: issue PO (wallet/capacity constraints), supplier catalog
-- [x] `tests/test_simulation.py` — 17 tests: demand generation, expiry penalties, daily costs, game over, advance_day
-- [x] `tests/test_api.py` — 34 integration tests: all endpoints (state, inventory, MOs, POs, demands, events, export/import, reset)
-- [x] **97/97 tests passing** (5.6s)
-
----
-
 *Last Updated: 2026-05-14*
-*Current Milestone: ALL PHASES COMPLETE ✅*
+*All phases complete ✅ — 98/98 tests passing*
+
+### Completed Phases
+
+| Phase | Description | Status |
+|-------|-------------|--------|
+| 1 | Foundation: project structure, DB schema, seeding | ✅ |
+| 2 | Core simulation: advance_day, production, purchasing, events | ✅ |
+| 3 | Business rules: wallet, capacity, reservations, penalties, game-over | ✅ |
+| 4 | Import/Export: JSON snapshot save/load | ✅ |
+| 5 | Frontend: React SPA with all tabs, served by FastAPI | ✅ |
+| 6 | Testing: 98 tests across 5 files, all passing | ✅ |
+| — | Two-server refactor: Supplier API split into standalone service | ✅ |
+
+### Notable Bug Fixes
+- Missing `Client` seed record (FK violation on demand generation)
+- `check_material_availability` ignored `reserved_quantity` (double-reservation)
+- `cancel_manufacturing_order` didn't unreserve materials
+- Warehouse capacity double-counted `reserved_quantity` (it's already included in `quantity`)
+- `mark_expired_demands` didn't deduct penalties from wallet
+- Export/import endpoints still referenced `PurchaseOrder` from factory DB after split
