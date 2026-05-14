@@ -18,7 +18,7 @@ A discrete-event simulation system that models the full production cycle of a fa
 ### Two-Server Design
 
 ```
-Browser
+Browser / AI Agent
   │
   ▼
 Factory API :8000  (FastAPI + SQLite: simulator.db)
@@ -27,19 +27,25 @@ Factory API :8000  (FastAPI + SQLite: simulator.db)
   │
   ├── /api/game/*                   game state, advance day, export/import
   ├── /api/manufacturing-orders/*   MO lifecycle
-  └── /api/suppliers, /api/purchase-orders
-           │
-           ▼  HTTP via supplier_client.py
+  ├── /api/suppliers, /api/purchase-orders
+  ├── /api/agent/context            full state snapshot for AI agents
+  │
+  │           HTTP via supplier_client.py (URL from manufacturer_config.json)
+  ▼
       Supplier API :8001  (FastAPI + SQLite: supplier.db)
            │
            ├── GET  /suppliers
            ├── GET  /suppliers/{id}/catalog
-           ├── GET  /suppliers/{id}/pricing/{material_id}
+           ├── GET  /suppliers/{id}/pricing/{material_id}[?quantity=N]
            ├── POST /orders
-           ├── GET  /orders
-           ├── GET  /orders/due?day=N
+           ├── GET  /orders, /orders/due?day=N
            ├── PUT  /orders/{id}/deliver
            ├── POST /prices/fluctuate
+           ├── POST /api/day/advance    (called by factory advance_day)
+           ├── GET  /api/catalog, /api/stock, /api/orders, /api/day/current
+           ├── POST /api/stock/{sp_id}/restock
+           ├── PUT  /api/pricing/tiers/{tier_id}
+           ├── GET  /api/export, POST /api/import
            └── DELETE /orders
 ```
 
@@ -71,6 +77,20 @@ The Factory API never touches supplier.db directly. All supplier/pricing/PO data
 
 12. **Partial Order Handling**: Release N < MO.quantity → splits into a new released MO (N units) + the original shrinks to (quantity − N). `remaining_qty` tracks production progress.
 
+13. **Supplier Auto-Advance**: `advance_day()` calls `supplier_client.advance_supplier_day()` (POST /api/day/advance) automatically. The human only needs to advance the manufacturer; the supplier advances in lockstep.
+
+14. **Quantity-Based Pricing Tiers**: 4 tiers per supplier-product (1/10/50/100 units: 0%/10%/18%/25% discount). `_compute_tier_price()` in supplier routes selects the best applicable tier. Factory passes `quantity` to pricing endpoint so the correct tier price is used for wallet check and deduction.
+
+15. **Stochastic Delivery Delays**: When an order is due, `random() < reliability` decides delivery. On failure: status → `delayed`, `expected_delivery_day` += randint(1,3). Delayed orders retry on subsequent days.
+
+16. **Supplier Stock Management**: Stock deducted at order creation. Replenished 15 units/day (max 500) each `POST /api/day/advance`. Factory checks stock before placing order (UI + API).
+
+17. **Local Purchase Order Tracking**: Factory's `simulator.db` has a `purchase_orders` table (`LocalPurchaseOrder`) mirroring every PO placed (status: pending → delivered). Created by `issue_purchase_order`, updated by `process_purchase_deliveries`. Cleared on reset/import.
+
+18. **Manufacturer Config File**: `manufacturer_config.json` at project root declares the provider URL. `supplier_client.py` reads it on startup; `SUPPLIER_API_URL` env var overrides.
+
+19. **Agent Context Endpoint**: `GET /api/agent/context` returns a single JSON with complete game state for AI agents: wallet, inventory with available qty, products + BOM + max producible, open demands + days remaining + revenue, active MOs, pending POs, supplier catalog with per-tier effective prices and affordability constraints.
+
 ## File Structure
 
 ```
@@ -80,12 +100,14 @@ app/                          # Factory API
     database.py               # Engine, SessionLocal, Base, get_db, init_db
     models.py                 # ORM: GameState, DailyCosts, Config, Client,
                               #   Product, RawMaterial, BOM, Inventory,
-                              #   ManufacturingOrder, DemandOrder, Event
+                              #   ManufacturingOrder, DemandOrder, Event,
+                              #   LocalPurchaseOrder
   schemas/
     __init__.py
     inventory.py              # InventoryItemResponse
     manufacturing.py          # ManufacturingOrderResponse, BOMLineResponse, etc.
     order.py                  # GameStateResponse
+    purchase.py               # PricingTierResponse, CatalogItemResponse, etc.
   services/
     simulation.py             # advance_day(), generate_demand_orders(),
                               #   process_production(), mark_expired_demands(),
@@ -95,19 +117,24 @@ app/                          # Factory API
                               #   get_supplier_catalog(), list_purchase_orders()
     inventory.py              # reserve_materials(), consume_materials(),
                               #   unreserve_materials(), check_material_availability()
-    supplier_client.py        # HTTP client for Supplier API (httpx, sync)
+    supplier_client.py        # HTTP client for Supplier API (httpx, sync);
+                              #   reads manufacturer_config.json for base URL
     seed.py                   # seed_initial_data(), reset_game()
   api/
     game.py                   # /api/game/* endpoints
     manufacturing.py          # /api/manufacturing-orders/* endpoints
     purchasing.py             # /api/suppliers/*, /api/purchase-orders endpoints
+    agent.py                  # /api/agent/context — full state for AI agents
 
 supplier_api/                 # Supplier API (standalone, port 8001)
   main.py                     # FastAPI app; calls init_db() + seed() on startup
   database.py                 # Engine for supplier.db
-  models.py                   # Supplier, SupplierProduct, PurchaseOrder
-  routes.py                   # All 9 supplier endpoints
-  seed.py                     # 3 suppliers, 8 materials, 24 SupplierProduct links
+  models.py                   # Supplier, SupplierProduct, PricingTier, Stock,
+                              #   PurchaseOrder, SimState, SupplierEvent
+  routes.py                   # Inter-service endpoints (/suppliers, /orders, /prices/*)
+                              #   + CLI/agent endpoints (/api/catalog, /api/stock, …)
+  seed.py                     # 3 suppliers, 8 materials, 24 SupplierProducts,
+                              #   96 pricing tiers (4 per product), stock 500 each
 
 frontend/
   src/
@@ -124,6 +151,12 @@ tests/
   test_simulation.py          # 17 tests: demand gen, expiry+penalty, costs, game over
   test_api.py                 # 43 tests: all HTTP endpoints (integration)
 
+manufacturer_cli.py           # CLI for Factory API (manufacturer-cli entrypoint)
+manufacturer-cli              # Executable wrapper for manufacturer_cli.py
+provider_cli.py               # CLI for Supplier API (provider-cli entrypoint)
+provider-cli                  # Executable wrapper for provider_cli.py
+manufacturer_config.json      # Provider URL config read by supplier_client.py
+seed-provider.json            # Reproducible starting state for Supplier API
 start.sh                      # Builds frontend → starts Supplier API → starts Factory API
 stop.sh                       # Kills all services
 pytest.ini                    # testpaths = tests, asyncio_mode = auto
@@ -145,6 +178,7 @@ pytest.ini                    # testpaths = tests, asyncio_mode = auto
 | `inventory` | quantity + reserved_quantity per material |
 | `manufacturing_orders` | Status: pending → released → completed / cancelled |
 | `demand_orders` | Status: open → partial / fulfilled / lost |
+| `purchase_orders` | Local mirror of POs placed (status: pending / delivered) |
 | `events` | Append-only audit log (event_type, sim_day, category, details JSON) |
 
 ### Supplier DB (supplier.db)
@@ -153,7 +187,11 @@ pytest.ini                    # testpaths = tests, asyncio_mode = auto
 |-------|---------|
 | `suppliers` | name, lead_time_days, reliability |
 | `supplier_products` | supplier × material_id × base_unit_cost × daily_price_factor |
-| `purchase_orders` | All POs; status: pending → delivered |
+| `pricing_tiers` | supplier_product × min_quantity × unit_price (4 tiers per product) |
+| `stock` | Current units held per supplier_product (replenishes 15/day, max 500) |
+| `purchase_orders` | All POs; status: pending → shipped → delivered → received (+ delayed) |
+| `sim_state` | Key-value store for supplier current_day |
+| `supplier_events` | Supplier-side audit log (order_placed, order_shipped, order_delivered, order_delayed, price_changed, day_advanced, stock_updated) |
 
 ### Relationships
 
@@ -174,23 +212,31 @@ Supplier → PurchaseOrder
 ```
 advance_day(db):
   1. supplier_client.fluctuate_prices()          → Supplier API: POST /prices/fluctuate
-  2. generate_demand_orders(db, day)             → 1-2 random DemandOrders
-  3. supplier_client.get_due_orders(day)         → Supplier API: GET /orders/due?day=N
+  2. supplier_client.advance_supplier_day()      → Supplier API: POST /api/day/advance
+     → pending orders → shipped
+     → shipped/delayed orders due today: reliability roll
+        success → delivered; failure → delayed (new due date +1-3 days)
+     → supplier stock replenished (+15/day, max 500)
+     → supplier current_day += 1
+  3. generate_demand_orders(db, day)             → 1-2 random DemandOrders
+  4. process_purchase_deliveries(db, day)
+     → supplier_client.get_due_orders(day)       → GET /orders/due?day=N (status=delivered)
      → update local Inventory.quantity
-     → supplier_client.deliver_order(id, day)    → Supplier API: PUT /orders/{id}/deliver
-  4. process_production(db, day)
+     → update LocalPurchaseOrder.status = "delivered"
+     → supplier_client.deliver_order(id, day)    → PUT /orders/{id}/deliver (→ received)
+  5. process_production(db, day)
      → for each released MO (up to daily_production_capacity):
         check BOM availability → consume materials → mark completed
-  5. mark_expired_demands(db, day)
+  6. mark_expired_demands(db, day)
      → status="lost", penalty=€50×unfulfilled, deduct from wallet
      → log DEMAND_EXPIRED + PENALTY_DEDUCTED events
-  6. calculate_daily_costs(db, day)              → deduct fixed_cost
+  7. calculate_daily_costs(db, day)              → deduct fixed_cost
      → deduct production_stats["cost"] (variable + energy + maintenance)
-  7. check_game_over(db, day)
+  8. check_game_over(db, day)
      → wallet < 0: days_with_negative_balance++
      → >= 3 consecutive: game_over = True
-  8. current_day += 1
-  9. db.commit()
+  9. current_day += 1
+  10. db.commit()
 ```
 
 ## Business Rules
@@ -209,6 +255,9 @@ advance_day(db):
 | Price fluctuation | ±10% daily (uniform random in [0.90, 1.10]) |
 | Demand orders per day | 1–2 (random) |
 | Demand due window | 3–7 days from request_day |
+| Pricing tiers | 1+ units: base; 10+: −10%; 50+: −18%; 100+: −25% |
+| Supplier reliability | Probability of on-time delivery; failure → 1–3 day delay |
+| Supplier stock replenishment | +15 units/day per product, max 500 |
 
 ## API Endpoints
 
@@ -237,21 +286,40 @@ advance_day(db):
 | GET | /api/suppliers/{id}/pricing/{mat_id} | Single material pricing |
 | GET | /api/purchase-orders | List all POs (via Supplier API) |
 | POST | /api/purchase-orders | Issue new PO (wallet + capacity check) |
+| GET | /api/agent/context | Full game state snapshot for AI agents |
 
 ### Supplier API (port 8001)
+
+**Inter-service endpoints (called by Factory API):**
 
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | /health | Health check |
 | GET | /suppliers | List all suppliers |
-| GET | /suppliers/{id}/catalog | Catalog with current prices |
-| GET | /suppliers/{id}/pricing/{mat_id} | Single material pricing |
-| POST | /orders | Create purchase order |
+| GET | /suppliers/{id}/catalog | Catalog with current prices + tiers + stock |
+| GET | /suppliers/{id}/pricing/{mat_id}?quantity=N | Pricing (tier-adjusted if quantity given) |
+| POST | /orders | Create purchase order (deducts stock) |
 | GET | /orders | List all orders |
-| GET | /orders/due?day=N | Orders due on or before day N |
-| PUT | /orders/{id}/deliver | Mark order as delivered |
+| GET | /orders/due?day=N | Delivered orders awaiting factory acknowledgement |
+| PUT | /orders/{id}/deliver | Mark order as received by factory |
 | POST | /prices/fluctuate | Apply ±10% price fluctuation |
-| DELETE | /orders | Delete all orders (used by game import/reset) |
+| POST | /api/day/advance | Advance supplier day (ship pending, deliver due, replenish stock) |
+| DELETE | /orders | Delete all orders (used by import/reset) |
+
+**CLI/agent endpoints:**
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | /api/catalog | All products with pricing tiers and stock |
+| GET | /api/stock | Current stock levels |
+| POST | /api/orders | Place order (stock check + tier pricing, no pre-computed price) |
+| GET | /api/orders?status= | List orders with optional status filter |
+| GET | /api/orders/{id} | Order detail |
+| POST | /api/stock/{sp_id}/restock | Add to supplier stock |
+| PUT | /api/pricing/tiers/{tier_id} | Update a pricing tier |
+| GET | /api/day/current | Current supplier day |
+| GET | /api/export | Export supplier state as JSON |
+| POST | /api/import | Restore supplier state from JSON |
 
 ## Coding Conventions
 
@@ -295,7 +363,7 @@ pytest tests/ -v  # 98 tests, ~4s
 
 ## Current State
 
-*Last Updated: 2026-05-14*
+*Last Updated: 2026-05-15*
 *All phases complete ✅ — 98/98 tests passing*
 
 ### Completed Phases
@@ -309,6 +377,19 @@ pytest tests/ -v  # 98 tests, ~4s
 | 5 | Frontend: React SPA with all tabs, served by FastAPI | ✅ |
 | 6 | Testing: 98 tests across 5 files, all passing | ✅ |
 | — | Two-server refactor: Supplier API split into standalone service | ✅ |
+| W6 | Week 6: provider app + manufacturer supply chain integration | ✅ |
+
+### Week 6 Additions
+- `manufacturer_cli.py` / `provider_cli.py` — full CLIs for both apps
+- `manufacturer_config.json` — declares provider URL (read by `supplier_client.py`)
+- `seed-provider.json` — reproducible starting state for Supplier API
+- Quantity-based pricing tiers (4 per product, up to 25% discount)
+- Stochastic delivery delays based on supplier `reliability` field
+- Factory auto-advances supplier day on each `advance_day()` call
+- `LocalPurchaseOrder` table in `simulator.db` — local mirror of every PO placed
+- `GET /api/agent/context` — single-call full state for AI agents
+- Supplier stock deducted at order time, replenished 15/day (max 500)
+- Order form validations: stock limit, wallet limit, warehouse capacity limit
 
 ### Notable Bug Fixes
 - Missing `Client` seed record (FK violation on demand generation)
@@ -317,3 +398,4 @@ pytest tests/ -v  # 98 tests, ~4s
 - Warehouse capacity double-counted `reserved_quantity` (it's already included in `quantity`)
 - `mark_expired_demands` didn't deduct penalties from wallet
 - Export/import endpoints still referenced `PurchaseOrder` from factory DB after split
+- Tier 1 was more expensive than base price (1.30× surcharge) — fixed to 1.00×
