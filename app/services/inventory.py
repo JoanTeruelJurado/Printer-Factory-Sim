@@ -97,7 +97,7 @@ def check_material_availability(
     for bom in product.bom_lines:
         required = bom.qty_needed * quantity
         inventory = db.query(Inventory).filter_by(material_id=bom.material_id).first()
-        available = inventory.quantity if inventory else 0
+        available = (inventory.quantity - inventory.reserved_quantity) if inventory else 0
         
         if available < required:
             fully_available = False
@@ -113,6 +113,26 @@ def check_material_availability(
         "fully_available": fully_available,
         "shortages": shortages,
     }
+
+
+def unreserve_materials(db: Session, manufacturing_order_id: int) -> None:
+    """
+    Release reserved materials back to available stock for a cancelled order.
+
+    Args:
+        db: Database session
+        manufacturing_order_id: ID of manufacturing order being cancelled
+    """
+    order = db.query(ManufacturingOrder).filter_by(id=manufacturing_order_id).first()
+    if not order:
+        raise ValueError(f"Manufacturing order {manufacturing_order_id} not found")
+
+    qty_reserved = order.remaining_qty
+    for bom in order.product.bom_lines:
+        required = bom.qty_needed * qty_reserved
+        inventory = db.query(Inventory).filter_by(material_id=bom.material_id).first()
+        if inventory:
+            inventory.reserved_quantity = max(0.0, inventory.reserved_quantity - required)
 
 
 def get_available_quantity(db: Session, material_id: int) -> float:

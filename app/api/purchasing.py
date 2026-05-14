@@ -27,7 +27,10 @@ router = APIRouter()
 @router.get("/suppliers", response_model=list[SupplierResponse])
 def get_suppliers(db: Session = Depends(get_db)) -> list[SupplierResponse]:
     """List all suppliers."""
-    suppliers = list_suppliers(db)
+    try:
+        suppliers = list_suppliers(db)
+    except PurchasingError as e:
+        raise HTTPException(status_code=503, detail=str(e))
     return [SupplierResponse(**s) for s in suppliers]
 
 
@@ -61,7 +64,10 @@ def get_pricing(
 @router.get("/purchase-orders", response_model=list[PurchaseOrderResponse])
 def list_orders(db: Session = Depends(get_db)) -> list[PurchaseOrderResponse]:
     """List all purchase orders."""
-    orders = list_purchase_orders(db)
+    try:
+        orders = list_purchase_orders(db)
+    except PurchasingError as e:
+        raise HTTPException(status_code=503, detail=str(e))
     return [PurchaseOrderResponse(**o) for o in orders]
 
 
@@ -75,11 +81,11 @@ def create_order(
         game_state = db.query(GameState).filter_by(id=1).first()
         if not game_state:
             raise HTTPException(status_code=404, detail="Game state not found")
-        
+
         if game_state.game_over:
             raise HTTPException(status_code=403, detail="Game is over")
-        
-        po = issue_purchase_order(
+
+        order_data = issue_purchase_order(
             db,
             req.supplier_id,
             req.material_id,
@@ -87,20 +93,7 @@ def create_order(
             game_state.current_day,
         )
         db.commit()
-        
-        return PurchaseOrderResponse(
-            po_id=po.id,
-            supplier_id=po.supplier_id,
-            supplier_name=po.supplier.name,
-            material_id=po.material_id,
-            material_name=po.material.name,
-            quantity=po.quantity,
-            issue_day=po.issue_day,
-            expected_delivery_day=po.expected_delivery_day,
-            actual_delivery_day=po.actual_delivery_day,
-            status=po.status,
-            unit_cost=po.unit_cost,
-            total_cost=po.total_cost,
-        )
+
+        return PurchaseOrderResponse(**order_data)
     except PurchasingError as e:
         raise HTTPException(status_code=422, detail=str(e))

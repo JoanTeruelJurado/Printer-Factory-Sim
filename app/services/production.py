@@ -7,7 +7,7 @@ Handles creation, release, and cancellation of manufacturing orders.
 from sqlalchemy.orm import Session
 
 from app.db.models import ManufacturingOrder, GameState, Product
-from app.services.inventory import reserve_materials, check_material_availability
+from app.services.inventory import reserve_materials, check_material_availability, unreserve_materials
 
 
 class ProductionError(Exception):
@@ -99,19 +99,34 @@ def release_manufacturing_order(
         ])
         raise ProductionError(f"Insufficient materials: {shortage_msg}")
     
-    # If releasing entire order, mark as released
+    current_day = db.query(GameState).filter_by(id=1).first().current_day
+
     if quantity_to_release == order.remaining_qty:
+        # Full release
         order.status = "released"
-        order.release_day = db.query(GameState).filter_by(id=1).first().current_day
-        
-        # Reserve all materials
+        order.release_day = current_day
         reserve_materials(db, order_id)
     else:
-        # Partial release - need to handle differently
-        # For now, we'll reserve materials for partial quantity
-        # This is more complex and would need additional logic
-        raise ProductionError("Partial order release not yet implemented")
-    
+        # Partial release: split into a new released order + keep original pending
+        remainder = order.remaining_qty - quantity_to_release
+        order.quantity = order.quantity - quantity_to_release
+        order.remaining_qty = remainder
+        # order stays "pending" with the remainder
+
+        released_order = ManufacturingOrder(
+            product_id=order.product_id,
+            quantity=quantity_to_release,
+            created_day=order.created_day,
+            release_day=current_day,
+            status="released",
+            remaining_qty=quantity_to_release,
+        )
+        db.add(released_order)
+        db.flush()
+        reserve_materials(db, released_order.id)
+        db.flush()
+        return released_order
+
     db.flush()
     return order
 
@@ -139,10 +154,7 @@ def cancel_manufacturing_order(db: Session, order_id: int) -> ManufacturingOrder
     if order.status == "pending":
         order.status = "cancelled"
     elif order.status == "released":
-        # Release reserved materials
-        from app.services.inventory import consume_materials
-        # Actually, we need to UNRESERVE, not consume
-        # For now, mark as cancelled and leave materials reserved
+        unreserve_materials(db, order_id)
         order.status = "cancelled"
     else:
         raise ProductionError(f"Cannot cancel order in {order.status} status")

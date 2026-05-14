@@ -1,11 +1,19 @@
+import json
+from datetime import datetime
+
 from fastapi import APIRouter, Body, Depends, HTTPException
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 from typing import Optional
 
 from app.db.database import get_db
-from app.db.models import Config, DemandOrder, Event, GameState, Inventory, ManufacturingOrder, Product
+from app.db.models import (
+    Config, DemandOrder, Event, GameState, Inventory,
+    ManufacturingOrder, Product,
+)
+from app.services import supplier_client
 from app.schemas import GameStateResponse, InventoryItemResponse
 from app.services.seed import reset_game
 from app.services.simulation import advance_day, SimulationError
@@ -24,8 +32,9 @@ def get_game_state(db: Session = Depends(get_db)) -> GameStateResponse:
     if state is None:
         raise HTTPException(status_code=404, detail="Game state not found")
 
+    # reserved_quantity is already included in quantity — no double-counting
     warehouse_used = db.query(Inventory).with_entities(
-        (Inventory.quantity + Inventory.reserved_quantity).label("used")
+        Inventory.quantity.label("used")
     ).all()
     total_used = sum(row.used for row in warehouse_used)
 
@@ -263,3 +272,173 @@ def advance_day_endpoint(db: Session = Depends(get_db)) -> dict:
         raise HTTPException(status_code=422, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Simulation error: {str(e)}")
+
+
+@router.get("/export")
+def export_game(db: Session = Depends(get_db)) -> JSONResponse:
+    """Export full game state as a downloadable JSON snapshot."""
+    state = db.query(GameState).filter(GameState.id == 1).first()
+    if state is None:
+        raise HTTPException(status_code=404, detail="Game state not found")
+
+    inventory = db.query(Inventory).all()
+    manufacturing_orders = db.query(ManufacturingOrder).all()
+    demand_orders = db.query(DemandOrder).all()
+    try:
+        purchase_orders = supplier_client.get_orders()
+    except supplier_client.SupplierAPIError:
+        purchase_orders = []
+    events = db.query(Event).all()
+
+    snapshot = {
+        "exported_at": datetime.utcnow().isoformat(),
+        "game_state": {
+            "current_day": state.current_day,
+            "wallet_balance": state.wallet_balance,
+            "warehouse_capacity": state.warehouse_capacity,
+            "daily_production_capacity": state.daily_production_capacity,
+            "days_with_negative_balance": state.days_with_negative_balance,
+            "game_over": state.game_over,
+        },
+        "inventory": [
+            {"material_id": i.material_id, "quantity": i.quantity, "reserved_quantity": i.reserved_quantity}
+            for i in inventory
+        ],
+        "manufacturing_orders": [
+            {
+                "id": mo.id, "product_id": mo.product_id, "quantity": mo.quantity,
+                "remaining_qty": mo.remaining_qty, "status": mo.status,
+                "created_day": mo.created_day, "release_day": mo.release_day,
+                "completed_day": mo.completed_day,
+            }
+            for mo in manufacturing_orders
+        ],
+        "demand_orders": [
+            {
+                "id": do.id, "client_id": do.client_id, "product_id": do.product_id,
+                "quantity": do.quantity, "fulfilled_qty": do.fulfilled_qty,
+                "request_day": do.request_day, "due_day": do.due_day,
+                "status": do.status, "penalty_amount": do.penalty_amount,
+            }
+            for do in demand_orders
+        ],
+        "purchase_orders": [
+            {
+                "id": po["id"], "supplier_id": po["supplier_id"], "material_id": po["material_id"],
+                "material_name": po["material_name"], "quantity": po["quantity"],
+                "packaging_type": po["packaging_type"],
+                "issue_day": po["issue_day"], "expected_delivery_day": po["expected_delivery_day"],
+                "actual_delivery_day": po.get("actual_delivery_day"),
+                "status": po["status"], "unit_cost": po["unit_cost"], "total_cost": po["total_cost"],
+            }
+            for po in purchase_orders
+        ],
+        "events": [
+            {
+                "id": e.id, "event_type": e.event_type, "sim_day": e.sim_day,
+                "category": e.category, "details": e.details,
+                "timestamp": e.timestamp.isoformat(),
+            }
+            for e in events
+        ],
+    }
+
+    filename = f"factory_save_day{state.current_day}.json"
+    return JSONResponse(
+        content=snapshot,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.post("/import")
+def import_game(payload: dict = Body(...), db: Session = Depends(get_db)) -> dict:
+    """Import a game snapshot, replacing all transactional data."""
+    required_keys = {"game_state", "inventory", "manufacturing_orders", "demand_orders", "purchase_orders"}
+    if not required_keys.issubset(payload.keys()):
+        raise HTTPException(status_code=422, detail=f"Missing keys: {required_keys - payload.keys()}")
+
+    try:
+        # Wipe transactional tables
+        db.query(Event).delete()
+        db.query(DemandOrder).delete()
+        db.query(ManufacturingOrder).delete()
+        try:
+            supplier_client.reset_orders()
+        except supplier_client.SupplierAPIError:
+            pass  # Supplier API unavailable — skip PO reset
+
+        # Restore game state
+        gs_data = payload["game_state"]
+        state = db.query(GameState).filter(GameState.id == 1).first()
+        if state is None:
+            raise HTTPException(status_code=404, detail="Game state not found")
+        state.current_day = gs_data["current_day"]
+        state.wallet_balance = gs_data["wallet_balance"]
+        state.warehouse_capacity = gs_data["warehouse_capacity"]
+        state.daily_production_capacity = gs_data["daily_production_capacity"]
+        state.days_with_negative_balance = gs_data["days_with_negative_balance"]
+        state.game_over = gs_data["game_over"]
+        state.last_updated = datetime.utcnow()
+
+        # Restore inventory
+        for inv_data in payload["inventory"]:
+            inv = db.query(Inventory).filter(Inventory.material_id == inv_data["material_id"]).first()
+            if inv:
+                inv.quantity = inv_data["quantity"]
+                inv.reserved_quantity = inv_data["reserved_quantity"]
+
+        db.flush()
+
+        # Restore manufacturing orders (preserve IDs)
+        for mo_data in payload["manufacturing_orders"]:
+            db.add(ManufacturingOrder(
+                id=mo_data["id"], product_id=mo_data["product_id"],
+                quantity=mo_data["quantity"], remaining_qty=mo_data["remaining_qty"],
+                status=mo_data["status"], created_day=mo_data["created_day"],
+                release_day=mo_data.get("release_day"), completed_day=mo_data.get("completed_day"),
+            ))
+
+        # Restore demand orders
+        for do_data in payload["demand_orders"]:
+            db.add(DemandOrder(
+                id=do_data["id"], client_id=do_data["client_id"],
+                product_id=do_data["product_id"], quantity=do_data["quantity"],
+                fulfilled_qty=do_data["fulfilled_qty"], request_day=do_data["request_day"],
+                due_day=do_data["due_day"], status=do_data["status"],
+                penalty_amount=do_data.get("penalty_amount", 0.0),
+            ))
+
+        # Restore purchase orders in Supplier API
+        for po_data in payload["purchase_orders"]:
+            try:
+                supplier_client.create_order({
+                    "supplier_id": po_data["supplier_id"],
+                    "material_id": po_data["material_id"],
+                    "material_name": po_data.get("material_name", str(po_data["material_id"])),
+                    "quantity": po_data["quantity"],
+                    "packaging_type": po_data.get("packaging_type", "unit"),
+                    "issue_day": po_data["issue_day"],
+                    "unit_cost": po_data["unit_cost"],
+                    "total_cost": po_data["total_cost"],
+                    "expected_delivery_day": po_data["expected_delivery_day"],
+                })
+            except supplier_client.SupplierAPIError:
+                pass  # Supplier API unavailable — skip PO restore
+
+        # Restore events (optional field)
+        for ev_data in payload.get("events", []):
+            db.add(Event(
+                id=ev_data["id"], event_type=ev_data["event_type"],
+                sim_day=ev_data["sim_day"], category=ev_data["category"],
+                details=ev_data["details"],
+                timestamp=datetime.fromisoformat(ev_data["timestamp"]),
+            ))
+
+        db.commit()
+        return {"success": True, "message": f"Game imported at day {gs_data['current_day']}"}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Import failed: {str(e)}")

@@ -259,23 +259,61 @@ Supplier → PurchaseOrder → Inventory → BOM → (consume) ManufacturingOrde
 
 ---
 
-### Phase 3: Business Rules ⏳ NEXT
+### Phase 3: Business Rules ✅ COMPLETE
 
-#### Planned
-- Wallet constraint enforcement
-- Warehouse capacity validation
-- Production capacity limiting
-- Material reservation system (DONE - integrated in Phase 2)
-- Partial order handling
-- Late delivery penalties
-- Game over conditions (partially done)
+#### Completed ✅
+- [x] Wallet constraint enforcement (purchasing blocks if insufficient funds)
+- [x] Warehouse capacity validation (fixed double-count bug: reserved is subset of quantity)
+- [x] Production capacity limiting (daily_production_capacity enforced in process_production)
+- [x] Material reservation system (reserve on release, unreserve on cancel)
+- [x] Partial order handling (splits order into released + pending remainder)
+- [x] Late delivery penalties (€50/unfulfilled unit deducted from wallet on expiry)
+- [x] Game over conditions (3 consecutive days with negative balance)
+
+#### Bug Fixes Applied ✅
+- [x] Missing Client record in seed (FK violation on demand generation)
+- [x] check_material_availability ignored reserved quantities (double-reservation bug)
+- [x] cancel_manufacturing_order didn't unreserve materials (added unreserve_materials())
 
 ---
 
-*Last Updated: 2026-04-14*
-*Current Milestone: Phase 2 Complete → Phase 3 Business Rules Enforcement*
+### Phase 4: Import/Export ✅ COMPLETE
+
+#### Completed ✅
+- [x] Event logging system (integrated throughout Phase 2, 14 event types)
+- [x] GET /api/game/export — full JSON snapshot (game_state, inventory, orders, events)
+- [x] POST /api/game/import — restore snapshot (wipes transactional data, restores all)
+- [x] Frontend Save/Load buttons in GameHeader (Download/Upload icons, file picker)
 
 ---
 
-*Last Updated: 2026-04-14*
-*Current Milestone: Phase 1 Complete → Phase 2 Core Simulation In Progress*
+### Phase 5: Frontend ✅ COMPLETE (95%)
+
+#### Completed ✅
+- [x] React 19 + Vite 5 + TailwindCSS SPA
+- [x] GameHeader: day, wallet, production, warehouse capacity, dark/light mode, Save/Load/New Game
+- [x] GameTab: demand orders, finished goods, advance day, serve demands, create+release MO
+- [x] OrdersTab: manufacturing orders CRUD, BOM view, partial release modal
+- [x] InventoryTab: raw materials, stock, reserved, available, warehouse bar
+- [x] SuppliersTab: supplier catalog with price fluctuation, purchase order creation and tracking
+- [x] EventsTab: event log with category filter, grouped by day
+- [x] Toast notifications, theme toggle
+
+---
+
+### Phase 6: Testing ✅ COMPLETE
+
+#### Completed ✅
+- [x] pytest + httpx installed
+- [x] `tests/conftest.py` — in-memory SQLite (StaticPool), seeded fixtures, FastAPI TestClient with DB patching
+- [x] `tests/test_inventory.py` — 12 tests: reserve, consume, unreserve, availability check
+- [x] `tests/test_production.py` — 14 tests: create, full release, partial release (split), cancel + unreserve
+- [x] `tests/test_purchasing.py` — 12 tests: issue PO (wallet/capacity constraints), supplier catalog
+- [x] `tests/test_simulation.py` — 17 tests: demand generation, expiry penalties, daily costs, game over, advance_day
+- [x] `tests/test_api.py` — 34 integration tests: all endpoints (state, inventory, MOs, POs, demands, events, export/import, reset)
+- [x] **97/97 tests passing** (5.6s)
+
+---
+
+*Last Updated: 2026-05-14*
+*Current Milestone: ALL PHASES COMPLETE ✅*

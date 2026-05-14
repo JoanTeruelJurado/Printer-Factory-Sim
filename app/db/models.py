@@ -38,7 +38,6 @@ class RawMaterial(Base):
     base_price = Column(Float, nullable=False)
     volume_per_unit = Column(Float, nullable=False, default=1.0)
 
-    supplier_products = relationship("SupplierProduct", back_populates="material")
     inventory = relationship("Inventory", back_populates="material", uselist=False)
     bom_lines = relationship("BOM", back_populates="material")
 
@@ -63,32 +62,6 @@ class BOM(Base):
 
     product = relationship("Product", back_populates="bom_lines")
     material = relationship("RawMaterial", back_populates="bom_lines")
-
-
-class Supplier(Base):
-    __tablename__ = "suppliers"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    name = Column(String, nullable=False, unique=True)
-    lead_time_days = Column(Integer, nullable=False, default=0)
-    reliability = Column(Float, nullable=False, default=1.0)
-
-    supplier_products = relationship("SupplierProduct", back_populates="supplier")
-    purchase_orders = relationship("PurchaseOrder", back_populates="supplier")
-
-
-class SupplierProduct(Base):
-    __tablename__ = "supplier_products"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    supplier_id = Column(Integer, ForeignKey("suppliers.id"), nullable=False)
-    material_id = Column(Integer, ForeignKey("raw_materials.id"), nullable=False)
-    base_unit_cost = Column(Float, nullable=False)
-    daily_price_factor = Column(Float, nullable=False, default=1.0)
-    packaging_options = Column(Text, nullable=False, default='{"unit": 1, "box": 20, "pallet": 1000}')
-
-    supplier = relationship("Supplier", back_populates="supplier_products")
-    material = relationship("RawMaterial", back_populates="supplier_products")
 
 
 class Inventory(Base):
@@ -145,30 +118,6 @@ class DemandOrder(Base):
 
     client = relationship("Client", back_populates="demand_orders")
     product = relationship("Product")
-
-
-class PurchaseOrder(Base):
-    __tablename__ = "purchase_orders"
-    __table_args__ = (CheckConstraint("quantity > 0", name="ck_purchase_quantity_positive"),)
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    supplier_id = Column(Integer, ForeignKey("suppliers.id"), nullable=False)
-    material_id = Column(Integer, ForeignKey("raw_materials.id"), nullable=False)
-    quantity = Column(Integer, nullable=False)
-    packaging_type = Column(String, nullable=False)
-    issue_day = Column(Integer, nullable=False)
-    expected_delivery_day = Column(Integer, nullable=False)
-    actual_delivery_day = Column(Integer, nullable=True)
-    status = Column(
-        Enum("pending", "delivered", "delayed", "cancelled", name="purchase_status_enum"),
-        nullable=False,
-        default="pending",
-    )
-    unit_cost = Column(Float, nullable=False)
-    total_cost = Column(Float, nullable=False)
-
-    supplier = relationship("Supplier", back_populates="purchase_orders")
-    material = relationship("RawMaterial")
 
 
 class DailyCosts(Base):

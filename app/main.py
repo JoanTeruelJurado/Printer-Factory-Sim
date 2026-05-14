@@ -8,7 +8,7 @@ from app.api import game, manufacturing, purchasing
 from app.db.database import init_db
 from app.services.seed import seed_initial_data
 
-STATIC_DIR = Path(__file__).resolve().parent / "static"
+FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend" / "dist"
 
 app = FastAPI(
     title="3D Printer Factory Simulator",
@@ -18,17 +18,18 @@ app = FastAPI(
 app.include_router(game.router, prefix="/api/game", tags=["game"])
 app.include_router(manufacturing.router, prefix="/api", tags=["manufacturing"])
 app.include_router(purchasing.router, prefix="/api", tags=["purchasing"])
-app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
-
-
-@app.get("/", response_class=FileResponse)
-def root() -> Path:
-    return STATIC_DIR / "index.html"
+app.mount("/assets", StaticFiles(directory=FRONTEND_DIR / "assets"), name="assets")
 
 
 @app.get("/favicon.ico")
 def favicon() -> Response:
     return Response(status_code=204)
+
+
+@app.get("/{full_path:path}", response_class=FileResponse, include_in_schema=False)
+def spa_fallback(full_path: str) -> Path:
+    """Serve the React SPA for all non-API routes."""
+    return FRONTEND_DIR / "index.html"
 
 
 @app.on_event("startup")

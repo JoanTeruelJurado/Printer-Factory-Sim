@@ -20,10 +20,9 @@ from app.db.models import (
     Inventory,
     ManufacturingOrder,
     Product,
-    PurchaseOrder,
-    RawMaterial,
-    SupplierProduct,
 )
+from app.services import supplier_client
+from app.services.supplier_client import SupplierAPIError
 
 
 class SimulationError(Exception):
@@ -129,46 +128,57 @@ def generate_demand_orders(db: Session, current_day: int) -> int:
 def process_purchase_deliveries(db: Session, current_day: int) -> int:
     """
     Process purchase orders that are due to arrive today.
-    
+
+    Fetches due orders from the Supplier API, updates local inventory,
+    then marks each order as delivered in the Supplier API.
+
     Args:
         db: Database session
         current_day: Current simulation day
-        
+
     Returns:
         Number of purchase orders delivered
     """
-    deliveries = db.query(PurchaseOrder).filter(
-        PurchaseOrder.status == "pending",
-        PurchaseOrder.expected_delivery_day <= current_day,
-    ).all()
-    
+    try:
+        due_orders = supplier_client.get_due_orders(current_day)
+    except SupplierAPIError:
+        # If Supplier API is unavailable, skip deliveries gracefully
+        return 0
+
     delivered_count = 0
-    
-    for po in deliveries:
-        # Add materials to inventory
-        inventory = db.query(Inventory).filter_by(material_id=po.material_id).first()
+
+    for po in due_orders:
+        material_id = po["material_id"]
+        quantity = po["quantity"]
+
+        # Add materials to local inventory
+        inventory = db.query(Inventory).filter_by(material_id=material_id).first()
         if inventory:
-            inventory.quantity += po.quantity
-        
-        # Mark PO as delivered
-        po.status = "delivered"
-        po.actual_delivery_day = current_day
+            inventory.quantity += quantity
+
+        # Mark order as delivered in Supplier API
+        try:
+            supplier_client.deliver_order(po["id"], current_day)
+        except SupplierAPIError:
+            # Log but continue processing other orders
+            pass
+
         delivered_count += 1
-        
+
         log_event(
             db,
             "PURCHASE_DELIVERED",
             current_day,
             "purchase",
             {
-                "po_id": po.id,
-                "material_id": po.material_id,
-                "material_name": po.material.name,
-                "quantity": po.quantity,
-                "cost": po.total_cost,
+                "po_id": po["id"],
+                "material_id": material_id,
+                "material_name": po.get("material_name", str(material_id)),
+                "quantity": quantity,
+                "cost": po["total_cost"],
             },
         )
-    
+
     return delivered_count
 
 
@@ -399,21 +409,45 @@ def fulfill_demand_orders(db: Session, current_day: int) -> dict:
 
 
 def mark_expired_demands(db: Session, current_day: int) -> int:
-    """Mark open demand orders past their due date as lost."""
+    """Mark open demand orders past their due date as lost and apply penalties."""
     expired = db.query(DemandOrder).filter(
         DemandOrder.status.in_(["open", "partial"]),
         DemandOrder.due_day < current_day,
     ).all()
 
+    if not expired:
+        return 0
+
+    game_state = db.query(GameState).filter_by(id=1).first()
+
     for demand in expired:
+        unfulfilled = demand.quantity - demand.fulfilled_qty
+        penalty = unfulfilled * 50  # €50 per unfulfilled unit
         demand.status = "lost"
+        demand.penalty_amount = penalty
+        if game_state:
+            game_state.wallet_balance -= penalty
         log_event(
             db,
             "DEMAND_EXPIRED",
             current_day,
             "alert",
-            {"demand_id": demand.id, "product_id": demand.product_id, "quantity": demand.quantity},
+            {
+                "demand_id": demand.id,
+                "product_id": demand.product_id,
+                "quantity": demand.quantity,
+                "unfulfilled": unfulfilled,
+                "penalty": penalty,
+            },
         )
+        if penalty > 0:
+            log_event(
+                db,
+                "PENALTY_DEDUCTED",
+                current_day,
+                "financial",
+                {"demand_id": demand.id, "penalty": penalty},
+            )
 
     return len(expired)
 
@@ -458,18 +492,18 @@ def calculate_daily_costs(db: Session, current_day: int) -> float:
 def apply_daily_price_fluctuation(db: Session) -> None:
     """
     Apply daily price fluctuation to supplier products.
-    
-    Recalculates daily_price_factor (±10% random variation) for each supplier-material.
-    
+
+    Delegates to the Supplier API which recalculates daily_price_factor
+    (±10% random variation) for all supplier-material combinations.
+
     Args:
-        db: Database session
+        db: Database session (unused here; kept for signature compatibility)
     """
-    supplier_products = db.query(SupplierProduct).all()
-    
-    for sp in supplier_products:
-        sp.daily_price_factor = random.uniform(0.90, 1.10)
-    
-    db.flush()
+    try:
+        supplier_client.fluctuate_prices()
+    except SupplierAPIError:
+        # If Supplier API is unavailable, skip fluctuation gracefully
+        pass
 
 
 def check_game_over(db: Session, current_day: int) -> bool:

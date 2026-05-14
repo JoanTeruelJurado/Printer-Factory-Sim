@@ -79,7 +79,10 @@ export const API_ENDPOINTS = {
   },
   events: {
     list: '/events',
-    export: '/events/export',
+  },
+  save: {
+    export: '/game/export',
+    import: '/game/import',
   },
 };
 

@@ -1,5 +1,5 @@
-import { RefreshCw, Moon, Sun, RotateCcw } from 'lucide-react';
-import { useState } from 'react';
+import { RefreshCw, Moon, Sun, RotateCcw, Download, Upload } from 'lucide-react';
+import { useRef, useState } from 'react';
 import { useTheme } from '../theme.jsx';
 import { useAPI } from '../hooks/useAPI';
 import { API_ENDPOINTS } from '../utils/constants';
@@ -12,6 +12,9 @@ const GameHeader = ({ gameState, onRefresh }) => {
   const [showResetModal, setShowResetModal] = useState(false);
   const [resetting, setResetting] = useState(false);
   const [resetConfig, setResetConfig] = useState({ daily_production_capacity: 10, starting_wallet: 10000 });
+  const [exporting, setExporting] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const importInputRef = useRef(null);
 
   if (!gameState) return null;
 
@@ -22,6 +25,45 @@ const GameHeader = ({ gameState, onRefresh }) => {
     setRefreshing(true);
     await onRefresh();
     setRefreshing(false);
+  };
+
+  const handleExport = async () => {
+    setExporting(true);
+    try {
+      const res = await fetch('/api/game/export');
+      const blob = await res.blob();
+      const disposition = res.headers.get('Content-Disposition') || '';
+      const match = disposition.match(/filename="(.+?)"/);
+      const filename = match ? match[1] : 'factory_save.json';
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch {
+      // ignore
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  const handleImportFile = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setImporting(true);
+    try {
+      const text = await file.text();
+      const payload = JSON.parse(text);
+      await request('POST', API_ENDPOINTS.save.import, payload);
+      await onRefresh();
+      window.location.reload();
+    } catch {
+      // ignore
+    } finally {
+      setImporting(false);
+      e.target.value = '';
+    }
   };
 
   const handleReset = async () => {
@@ -103,6 +145,33 @@ const GameHeader = ({ gameState, onRefresh }) => {
                 title="Toggle dark/light mode"
               >
                 {isDark ? <Sun size={20} /> : <Moon size={20} />}
+              </button>
+
+              <button
+                onClick={handleExport}
+                disabled={exporting}
+                className="flex items-center gap-1 px-3 py-2 bg-blue-100 hover:bg-blue-200 dark:bg-blue-900 dark:hover:bg-blue-800 text-blue-700 dark:text-blue-300 rounded-lg text-sm font-medium transition"
+                title="Save game to file"
+              >
+                <Download size={16} />
+                {exporting ? '...' : 'Save'}
+              </button>
+
+              <input
+                ref={importInputRef}
+                type="file"
+                accept=".json"
+                className="hidden"
+                onChange={handleImportFile}
+              />
+              <button
+                onClick={() => importInputRef.current?.click()}
+                disabled={importing}
+                className="flex items-center gap-1 px-3 py-2 bg-green-100 hover:bg-green-200 dark:bg-green-900 dark:hover:bg-green-800 text-green-700 dark:text-green-300 rounded-lg text-sm font-medium transition"
+                title="Load game from file"
+              >
+                <Upload size={16} />
+                {importing ? '...' : 'Load'}
               </button>
 
               <button

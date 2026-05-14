@@ -13,8 +13,6 @@ from app.db.models import (
     Inventory,
     Product,
     RawMaterial,
-    Supplier,
-    SupplierProduct,
     Client,
 )
 
@@ -69,6 +67,10 @@ def seed_initial_data() -> None:
         for key, value in config_values.items():
             db.add(Config(key=key, value=value, description="Auto-populated initial configuration."))
 
+        # Create client (needed for demand order FK)
+        client = Client(name="Default Client")
+        db.add(client)
+
         # Create products
         products = [
             {"name": "Hobby Printer Mini", "product_type": "finished", "sell_price": 350.0, "assembly_time_hours": 2.0},
@@ -98,18 +100,6 @@ def seed_initial_data() -> None:
             db.add(material)
             material_objects.append(material)
             db.add(Inventory(material=material, quantity=150.0, reserved_quantity=0.0))
-
-        # Create suppliers
-        suppliers_data = [
-            {"name": "Industrial Materials Co.", "lead_time_days": 3, "reliability": 0.95},
-            {"name": "QuickShip Components", "lead_time_days": 1, "reliability": 0.85},
-            {"name": "Global Sourcing Ltd", "lead_time_days": 7, "reliability": 0.98},
-        ]
-        supplier_objects = []
-        for supplier_data in suppliers_data:
-            supplier = Supplier(**supplier_data)
-            db.add(supplier)
-            supplier_objects.append(supplier)
 
         db.flush()
 
@@ -152,66 +142,6 @@ def seed_initial_data() -> None:
         for material_idx, qty in industrial_bom:
             db.add(BOM(product_id=product_objects[2].id, material_id=material_objects[material_idx].id, qty_needed=qty))
 
-        db.flush()
-
-        # Create Supplier-Material links (SupplierProduct) with pricing
-        # Industrial Materials Co. (supplier_id = 1) - Premium, reliable, 3-day lead
-        supplier_1_pricing = [
-            (0, 28.0),   # ABS Filament: €28
-            (1, 25.0),   # PLA Filament: €25
-            (2, 17.0),   # Aluminum Extrusion: €17
-            (3, 10.0),   # Steel Rod: €10
-            (4, 21.0),   # Stepper Motor: €21
-            (5, 14.0),   # Linear Rail: €14
-            (6, 52.0),   # Control Board: €52
-            (7, 40.0),   # Hotend Assembly: €40
-        ]
-        for material_idx, cost in supplier_1_pricing:
-            db.add(SupplierProduct(
-                supplier_id=supplier_objects[0].id,
-                material_id=material_objects[material_idx].id,
-                base_unit_cost=cost,
-                daily_price_factor=1.0,
-            ))
-
-        # QuickShip Components (supplier_id = 2) - Cheap but unreliable, 1-day lead
-        supplier_2_pricing = [
-            (0, 22.0),   # ABS Filament: €22
-            (1, 19.0),   # PLA Filament: €19
-            (2, 12.0),   # Aluminum Extrusion: €12
-            (3, 6.0),    # Steel Rod: €6
-            (4, 15.0),   # Stepper Motor: €15
-            (5, 9.0),    # Linear Rail: €9
-            (6, 38.0),   # Control Board: €38
-            (7, 28.0),   # Hotend Assembly: €28
-        ]
-        for material_idx, cost in supplier_2_pricing:
-            db.add(SupplierProduct(
-                supplier_id=supplier_objects[1].id,
-                material_id=material_objects[material_idx].id,
-                base_unit_cost=cost,
-                daily_price_factor=1.0,
-            ))
-
-        # Global Sourcing Ltd (supplier_id = 3) - Mid-range, very reliable, 7-day lead
-        supplier_3_pricing = [
-            (0, 25.0),   # ABS Filament: €25
-            (1, 22.0),   # PLA Filament: €22
-            (2, 15.0),   # Aluminum Extrusion: €15
-            (3, 8.0),    # Steel Rod: €8
-            (4, 18.0),   # Stepper Motor: €18
-            (5, 12.0),   # Linear Rail: €12
-            (6, 45.0),   # Control Board: €45
-            (7, 35.0),   # Hotend Assembly: €35
-        ]
-        for material_idx, cost in supplier_3_pricing:
-            db.add(SupplierProduct(
-                supplier_id=supplier_objects[2].id,
-                material_id=material_objects[material_idx].id,
-                base_unit_cost=cost,
-                daily_price_factor=1.0,
-            ))
-
         db.commit()
     except IntegrityError as e:
         db.rollback()
@@ -220,9 +150,7 @@ def seed_initial_data() -> None:
         db.close()
 
 
-from datetime import datetime
-
-from app.db.models import DemandOrder, Event, ManufacturingOrder, PurchaseOrder
+from app.db.models import DemandOrder, Event, ManufacturingOrder
 
 
 def reset_game(db: Session, daily_production_capacity: int = 10, starting_wallet: float = 10000.0) -> None:
@@ -233,7 +161,6 @@ def reset_game(db: Session, daily_production_capacity: int = 10, starting_wallet
     # Clear all transactional data
     db.query(DemandOrder).delete()
     db.query(ManufacturingOrder).delete()
-    db.query(PurchaseOrder).delete()
     db.query(Event).delete()
 
     # Reset inventory to 150 units each
