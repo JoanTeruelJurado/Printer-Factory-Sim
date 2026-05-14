@@ -163,8 +163,8 @@ class TestPurchaseOrderEndpoints:
         # First, buy a lot to drain wallet
         sid = _supplier_id(client)
         mid = _abs_material_id(client)
-        # ABS costs €28/unit, 10000 wallet → buy 357 to nearly drain
-        client.post("/api/purchase-orders", json={"supplier_id": sid, "material_id": mid, "quantity": 357})
+        # ABS bulk price = €21/unit (qty>=100 tier), 10000 wallet → buy 476 to nearly drain (476×21=9996)
+        client.post("/api/purchase-orders", json={"supplier_id": sid, "material_id": mid, "quantity": 476})
         # Try to buy more
         r = client.post("/api/purchase-orders", json={"supplier_id": sid, "material_id": mid, "quantity": 100})
         assert r.status_code in (400, 422)

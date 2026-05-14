@@ -1,0 +1,5 @@
+#!/bin/bash
+# provider-cli — wrapper that delegates to provider_cli.py
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/venv/bin/activate" 2>/dev/null || true
+exec python3 "$SCRIPT_DIR/provider_cli.py" "$@"

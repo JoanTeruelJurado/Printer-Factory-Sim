@@ -1,6 +1,6 @@
 """Purchase orders and suppliers API endpoints."""
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.db.database import get_db
@@ -51,11 +51,12 @@ def get_catalog(supplier_id: int, db: Session = Depends(get_db)) -> SupplierCata
 def get_pricing(
     supplier_id: int,
     material_id: int,
+    quantity: int | None = Query(default=None, description="Quantity to apply volume tier pricing"),
     db: Session = Depends(get_db),
 ) -> MaterialPricingResponse:
     """Get pricing for a specific material from a supplier."""
     try:
-        pricing = get_material_pricing(db, supplier_id, material_id)
+        pricing = get_material_pricing(db, supplier_id, material_id, quantity=quantity)
         return MaterialPricingResponse(**pricing)
     except PurchasingError as e:
         raise HTTPException(status_code=422, detail=str(e))

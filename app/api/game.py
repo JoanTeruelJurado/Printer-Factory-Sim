@@ -11,7 +11,7 @@ from typing import Optional
 from app.db.database import get_db
 from app.db.models import (
     Config, DemandOrder, Event, GameState, Inventory,
-    ManufacturingOrder, Product,
+    LocalPurchaseOrder, ManufacturingOrder, Product,
 )
 from app.services import supplier_client
 from app.schemas import GameStateResponse, InventoryItemResponse
@@ -362,6 +362,7 @@ def import_game(payload: dict = Body(...), db: Session = Depends(get_db)) -> dic
         db.query(Event).delete()
         db.query(DemandOrder).delete()
         db.query(ManufacturingOrder).delete()
+        db.query(LocalPurchaseOrder).delete()
         try:
             supplier_client.reset_orders()
         except supplier_client.SupplierAPIError:
@@ -408,10 +409,10 @@ def import_game(payload: dict = Body(...), db: Session = Depends(get_db)) -> dic
                 penalty_amount=do_data.get("penalty_amount", 0.0),
             ))
 
-        # Restore purchase orders in Supplier API
+        # Restore purchase orders in Supplier API and local DB
         for po_data in payload["purchase_orders"]:
             try:
-                supplier_client.create_order({
+                result = supplier_client.create_order({
                     "supplier_id": po_data["supplier_id"],
                     "material_id": po_data["material_id"],
                     "material_name": po_data.get("material_name", str(po_data["material_id"])),
@@ -422,6 +423,25 @@ def import_game(payload: dict = Body(...), db: Session = Depends(get_db)) -> dic
                     "total_cost": po_data["total_cost"],
                     "expected_delivery_day": po_data["expected_delivery_day"],
                 })
+                # Mirror in local DB
+                local_status = (
+                    "delivered"
+                    if po_data.get("status") in ("delivered", "received")
+                    else "pending"
+                )
+                db.add(LocalPurchaseOrder(
+                    supplier_po_id=result["id"],
+                    supplier_id=result["supplier_id"],
+                    material_id=result["material_id"],
+                    material_name=result["material_name"],
+                    quantity=result["quantity"],
+                    unit_cost=result["unit_cost"],
+                    total_cost=result["total_cost"],
+                    issue_day=result["issue_day"],
+                    expected_delivery_day=result["expected_delivery_day"],
+                    status=local_status,
+                    actual_delivery_day=po_data.get("actual_delivery_day"),
+                ))
             except supplier_client.SupplierAPIError:
                 pass  # Supplier API unavailable — skip PO restore
 

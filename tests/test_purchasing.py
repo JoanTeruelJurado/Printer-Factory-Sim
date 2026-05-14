@@ -38,9 +38,9 @@ class TestIssuePurchaseOrder:
     def test_cost_equals_unit_price_times_quantity(self, db):
         mid = _abs_id(db)
         po = issue_purchase_order(db, 1, mid, 10, 1)
-        # Mock ABS price is 28.0/unit
-        assert po["unit_cost"] == pytest.approx(28.0)
-        assert po["total_cost"] == pytest.approx(28.0 * 10)
+        # Mock ABS base price 28.0; qty=10 qualifies for 10% tier discount → 25.20/unit
+        assert po["unit_cost"] == pytest.approx(28.0 * 0.90)
+        assert po["total_cost"] == pytest.approx(28.0 * 0.90 * 10)
 
     def test_insufficient_funds_raises(self, db):
         _state(db).wallet_balance = 1.0
@@ -61,7 +61,7 @@ class TestIssuePurchaseOrder:
     def test_supplier_api_error_raises_purchasing_error(self, db, monkeypatch):
         import app.services.supplier_client as sc
 
-        def _fail(sid, mid):
+        def _fail(sid, mid, quantity=None):
             raise sc.SupplierAPIError("down")
 
         monkeypatch.setattr(sc, "get_pricing", _fail)

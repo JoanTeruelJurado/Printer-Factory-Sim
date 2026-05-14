@@ -18,6 +18,7 @@ from app.db.models import (
     Event,
     GameState,
     Inventory,
+    LocalPurchaseOrder,
     ManufacturingOrder,
     Product,
 )
@@ -162,6 +163,12 @@ def process_purchase_deliveries(db: Session, current_day: int) -> int:
         except SupplierAPIError:
             # Log but continue processing other orders
             pass
+
+        # Update local copy
+        local_po = db.query(LocalPurchaseOrder).filter_by(supplier_po_id=po["id"]).first()
+        if local_po:
+            local_po.status = "delivered"
+            local_po.actual_delivery_day = current_day
 
         delivered_count += 1
 
@@ -587,11 +594,18 @@ def advance_day(db: Session) -> dict:
         
         # 1. Apply price fluctuation
         apply_daily_price_fluctuation(db)
-        
-        # 2. Generate demand
+
+        # 2. Advance the supplier's day so pending orders ship and due orders are delivered
+        supplier_day_result = {}
+        try:
+            supplier_day_result = supplier_client.advance_supplier_day()
+        except SupplierAPIError:
+            pass
+
+        # 3. Generate demand
         demands_created = generate_demand_orders(db, current_day)
-        
-        # 3. Process purchase deliveries
+
+        # 4. Process purchase deliveries (picks up orders the supplier just marked delivered)
         deliveries = process_purchase_deliveries(db, current_day)
         
         # 4. Process production
@@ -606,6 +620,8 @@ def advance_day(db: Session) -> dict:
         # Deduct production costs
         game_state.wallet_balance -= production_stats["cost"]
 
+        delayed_deliveries = supplier_day_result.get("delayed_count", 0)
+
         log_event(
             db,
             "DAY_SUMMARY",
@@ -614,6 +630,7 @@ def advance_day(db: Session) -> dict:
             {
                 "demands_created": demands_created,
                 "deliveries": deliveries,
+                "delayed_deliveries": delayed_deliveries,
                 "produced": production_stats["produced"],
                 "production_cost": production_stats["cost"],
                 "expired_demands": expired,
@@ -635,6 +652,7 @@ def advance_day(db: Session) -> dict:
             "day": current_day,
             "demands_created": demands_created,
             "deliveries": deliveries,
+            "delayed_deliveries": delayed_deliveries,
             "produced": production_stats["produced"],
             "production_cost": production_stats["cost"],
             "expired_demands": expired,

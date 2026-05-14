@@ -12,6 +12,11 @@ pkill -f "uvicorn supplier_api" 2>/dev/null || true
 pkill -f "vite" 2>/dev/null || true
 sleep 1
 
+# Borrar supplier.db para que el esquema nuevo se aplique limpio
+# (los datos se recrean automáticamente desde seed_supplier_data)
+echo "Recreando supplier.db con esquema actualizado..."
+rm -f "$SCRIPT_DIR/supplier.db"
+
 # Compilar el frontend (rápido si no hay cambios)
 echo "Compilando frontend..."
 cd frontend && npm run build --silent && cd ..

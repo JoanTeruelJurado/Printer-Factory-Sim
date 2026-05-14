@@ -150,7 +150,7 @@ def seed_initial_data() -> None:
         db.close()
 
 
-from app.db.models import DemandOrder, Event, ManufacturingOrder
+from app.db.models import DemandOrder, Event, LocalPurchaseOrder, ManufacturingOrder
 
 
 def reset_game(db: Session, daily_production_capacity: int = 10, starting_wallet: float = 10000.0) -> None:
@@ -162,6 +162,7 @@ def reset_game(db: Session, daily_production_capacity: int = 10, starting_wallet
     db.query(DemandOrder).delete()
     db.query(ManufacturingOrder).delete()
     db.query(Event).delete()
+    db.query(LocalPurchaseOrder).delete()
 
     # Reset inventory to 150 units each
     for inv in db.query(Inventory).all():

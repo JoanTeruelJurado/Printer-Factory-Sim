@@ -8,7 +8,7 @@ here as factory-side business logic.
 
 from sqlalchemy.orm import Session
 
-from app.db.models import GameState, Inventory
+from app.db.models import GameState, Inventory, LocalPurchaseOrder
 from app.services import supplier_client
 from app.services.supplier_client import SupplierAPIError
 
@@ -70,20 +70,17 @@ def get_supplier_catalog(db: Session, supplier_id: int) -> dict:
     }
 
 
-def get_material_pricing(db: Session, supplier_id: int, material_id: int) -> dict:
+def get_material_pricing(
+    db: Session, supplier_id: int, material_id: int, quantity: int | None = None
+) -> dict:
     """
     Get pricing for a specific material from a supplier.
 
-    Args:
-        db: Database session (unused — kept for signature compatibility)
-        supplier_id: ID of supplier
-        material_id: ID of material
-
-    Returns:
-        Dict with pricing details.
+    If *quantity* is provided, the returned price reflects the applicable
+    volume-discount tier (as computed by the Supplier API).
     """
     try:
-        data = supplier_client.get_pricing(supplier_id, material_id)
+        data = supplier_client.get_pricing(supplier_id, material_id, quantity=quantity)
     except SupplierAPIError as exc:
         raise PurchasingError(f"Could not reach Supplier API: {exc}") from exc
 
@@ -158,14 +155,14 @@ def issue_purchase_order(
     Raises:
         PurchasingError: If validation fails or Supplier API is unreachable.
     """
-    # 1. Get pricing
+    # 1. Get pricing — pass quantity so the Supplier applies volume-tier discounts
     try:
-        pricing = supplier_client.get_pricing(supplier_id, material_id)
+        pricing = supplier_client.get_pricing(supplier_id, material_id, quantity=quantity)
     except SupplierAPIError as exc:
         raise PurchasingError(f"Could not reach Supplier API: {exc}") from exc
 
     material_name = pricing["material_name"]
-    unit_cost = pricing["current_price_per_unit"]
+    unit_cost = pricing["current_price_per_unit"]  # tier-adjusted × daily factor
     lead_time_days = pricing["lead_time_days"]
 
     # 2. Calculate cost
@@ -214,7 +211,23 @@ def issue_purchase_order(
     # 6. Deduct wallet
     game_state.wallet_balance -= total_cost
 
-    # 7. Return normalised order dict (matches original PurchaseOrder field names)
+    # 7. Save a local copy so the factory knows what is on the way
+    local_po = LocalPurchaseOrder(
+        supplier_po_id=order_data["id"],
+        supplier_id=order_data["supplier_id"],
+        supplier_name=pricing.get("supplier_name", str(supplier_id)),
+        material_id=order_data["material_id"],
+        material_name=order_data["material_name"],
+        quantity=order_data["quantity"],
+        unit_cost=order_data["unit_cost"],
+        total_cost=order_data["total_cost"],
+        issue_day=order_data["issue_day"],
+        expected_delivery_day=order_data["expected_delivery_day"],
+        status="pending",
+    )
+    db.add(local_po)
+
+    # 8. Return normalised order dict (matches original PurchaseOrder field names)
     return {
         "po_id": order_data["id"],
         "supplier_id": order_data["supplier_id"],

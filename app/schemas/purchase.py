@@ -29,6 +29,12 @@ class MaterialPricingResponse(BaseModel):
         from_attributes = True
 
 
+class PricingTierResponse(BaseModel):
+    """Volume pricing tier."""
+    min_quantity: int
+    unit_price: float
+
+
 class CatalogItemResponse(BaseModel):
     """Supplier catalog item."""
     material_id: int
@@ -36,6 +42,8 @@ class CatalogItemResponse(BaseModel):
     base_unit_cost: float
     daily_price_factor: float
     current_price: float
+    stock: int = 0
+    pricing_tiers: list[PricingTierResponse] = []
 
     class Config:
         from_attributes = True

@@ -1,14 +1,14 @@
 """
 Seed data for the Supplier API.
 
-Seeds the same 3 suppliers, 8 materials, and 24 SupplierProduct links
-as in app/services/seed.py. Material names are stored directly.
+Seeds 3 suppliers, 8 materials, 24 SupplierProduct links, pricing tiers
+(3 per product), stock (500 units per product), and sim_state (day=1).
 """
 
 from sqlalchemy.exc import IntegrityError
 
 from supplier_api.database import SessionLocal
-from supplier_api.models import Supplier, SupplierProduct
+from supplier_api.models import PricingTier, SimState, Stock, Supplier, SupplierProduct
 
 
 def seed_supplier_data() -> None:
@@ -34,8 +34,6 @@ def seed_supplier_data() -> None:
         db.flush()
 
         # ── Material metadata (id matches factory raw_materials ids) ──────────
-        # Order here determines the material_id (1-based after flush).
-        # We keep the same ordering as factory seed to ensure IDs match.
         materials = [
             (1, "ABS Filament Spool (1kg)"),
             (2, "PLA Filament Spool (1kg)"),
@@ -47,7 +45,7 @@ def seed_supplier_data() -> None:
             (8, "Hotend Assembly"),
         ]
 
-        # ── Supplier-Product links ─────────────────────────────────────────────
+        # ── Base prices per supplier ───────────────────────────────────────────
         # Industrial Materials Co. — premium pricing
         supplier_1_pricing = [28.0, 25.0, 17.0, 10.0, 21.0, 14.0, 52.0, 40.0]
         # QuickShip Components — cheapest pricing
@@ -58,14 +56,49 @@ def seed_supplier_data() -> None:
         all_pricing = [supplier_1_pricing, supplier_2_pricing, supplier_3_pricing]
 
         for supplier_obj, pricing in zip(supplier_objects, all_pricing):
-            for (mat_id, mat_name), cost in zip(materials, pricing):
-                db.add(SupplierProduct(
+            for (mat_id, mat_name), base_cost in zip(materials, pricing):
+                sp = SupplierProduct(
                     supplier_id=supplier_obj.id,
                     material_id=mat_id,
                     material_name=mat_name,
-                    base_unit_cost=cost,
+                    base_unit_cost=base_cost,
                     daily_price_factor=1.0,
+                )
+                db.add(sp)
+                db.flush()
+
+                # ── Pricing tiers (4 per product) ──────────────────────────────
+                # Tier 1:  1-9   units → base price (matches catalog)
+                # Tier 2: 10-49  units → 10% discount
+                # Tier 3: 50-99  units → 18% discount
+                # Tier 4: 100+   units → 25% discount
+                db.add(PricingTier(
+                    supplier_product_id=sp.id,
+                    min_quantity=1,
+                    unit_price=round(base_cost * 1.00, 2),
                 ))
+                db.add(PricingTier(
+                    supplier_product_id=sp.id,
+                    min_quantity=10,
+                    unit_price=round(base_cost * 0.90, 2),
+                ))
+                db.add(PricingTier(
+                    supplier_product_id=sp.id,
+                    min_quantity=50,
+                    unit_price=round(base_cost * 0.82, 2),
+                ))
+                db.add(PricingTier(
+                    supplier_product_id=sp.id,
+                    min_quantity=100,
+                    unit_price=round(base_cost * 0.75, 2),
+                ))
+
+                # ── Initial stock (500 units per product) ──────────────────────
+                db.add(Stock(supplier_product_id=sp.id, quantity=500))
+
+        # ── Simulation state ───────────────────────────────────────────────────
+        if db.query(SimState).filter_by(key="current_day").first() is None:
+            db.add(SimState(key="current_day", value="1"))
 
         db.commit()
     except IntegrityError as e:

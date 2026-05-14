@@ -74,6 +74,7 @@ export const API_ENDPOINTS = {
   purchasing: {
     suppliers: '/suppliers',
     catalog: (id) => `/suppliers/${id}/catalog`,
+    pricing: (supplierId, materialId) => `/suppliers/${supplierId}/pricing/${materialId}`,
     orders: '/purchase-orders',
     create: '/purchase-orders',
   },

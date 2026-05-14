@@ -158,6 +158,31 @@ class Event(Base):
     )
 
 
+class LocalPurchaseOrder(Base):
+    """Local copy of purchase orders placed with the Supplier API.
+
+    Kept in the factory DB so the manufacturer knows what is on the way
+    even if the Supplier API is temporarily unavailable.
+    Status is a simplified view: pending → delivered.
+    """
+
+    __tablename__ = "purchase_orders"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    supplier_po_id = Column(Integer, nullable=False, unique=True)
+    supplier_id = Column(Integer, nullable=False)
+    supplier_name = Column(String, nullable=True)
+    material_id = Column(Integer, nullable=False)
+    material_name = Column(String, nullable=False)
+    quantity = Column(Integer, nullable=False)
+    unit_cost = Column(Float, nullable=False)
+    total_cost = Column(Float, nullable=False)
+    issue_day = Column(Integer, nullable=False)
+    expected_delivery_day = Column(Integer, nullable=False)
+    status = Column(String, nullable=False, default="pending")
+    actual_delivery_day = Column(Integer, nullable=True)
+
+
 class Config(Base):
     __tablename__ = "config"
 

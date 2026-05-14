@@ -8,11 +8,25 @@ Base URL is read from the SUPPLIER_API_URL environment variable,
 defaulting to http://localhost:8001.
 """
 
+import json
 import os
+from pathlib import Path
 
 import httpx
 
-SUPPLIER_API_URL: str = os.getenv("SUPPLIER_API_URL", "http://localhost:8001")
+# Load base URL from manufacturer_config.json if present; env var overrides.
+_CONFIG_PATH = Path(__file__).resolve().parent.parent.parent / "manufacturer_config.json"
+_config_url: str | None = None
+if _CONFIG_PATH.exists():
+    try:
+        _cfg = json.loads(_CONFIG_PATH.read_text())
+        _providers = _cfg.get("manufacturer", {}).get("providers", [])
+        if _providers:
+            _config_url = _providers[0]["url"]
+    except Exception:
+        pass
+
+SUPPLIER_API_URL: str = os.getenv("SUPPLIER_API_URL", _config_url or "http://localhost:8001")
 
 # Shared timeout (seconds) for all requests
 _TIMEOUT = httpx.Timeout(10.0)
@@ -106,9 +120,14 @@ def get_catalog(supplier_id: int) -> dict:
     return _get(f"/suppliers/{supplier_id}/catalog").json()
 
 
-def get_pricing(supplier_id: int, material_id: int) -> dict:
-    """Return pricing details for a specific material from a supplier."""
-    return _get(f"/suppliers/{supplier_id}/pricing/{material_id}").json()
+def get_pricing(supplier_id: int, material_id: int, quantity: int | None = None) -> dict:
+    """Return pricing details for a specific material from a supplier.
+
+    If *quantity* is provided, the returned price reflects the applicable
+    volume-discount tier (as computed by the Supplier API).
+    """
+    params = {"quantity": quantity} if quantity is not None else {}
+    return _get(f"/suppliers/{supplier_id}/pricing/{material_id}", **params).json()
 
 
 def create_order(payload: dict) -> dict:
@@ -129,6 +148,11 @@ def get_due_orders(day: int) -> list[dict]:
 def deliver_order(order_id: int, actual_delivery_day: int) -> dict:
     """Mark a purchase order as delivered. Returns the updated order dict."""
     return _put(f"/orders/{order_id}/deliver", {"actual_delivery_day": actual_delivery_day}).json()
+
+
+def advance_supplier_day() -> dict:
+    """Advance the supplier's simulation day (ships pending orders, delivers due ones)."""
+    return _post("/api/day/advance", {}).json()
 
 
 def fluctuate_prices() -> None:

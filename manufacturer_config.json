@@ -1,0 +1,12 @@
+{
+  "manufacturer": {
+    "port": 8000,
+    "providers": [
+      {
+        "name": "Supplier API",
+        "url": "http://localhost:8001",
+        "description": "Unified supplier API serving Industrial Materials Co., QuickShip Components and Global Sourcing Ltd."
+      }
+    ]
+  }
+}

@@ -151,6 +151,14 @@ def mock_supplier_client(monkeypatch):
     def fake_get_suppliers():
         return [{"id": 1, "name": "TestSupplier", "lead_time_days": 2, "reliability": 0.95}]
 
+    def _tiers(base):
+        return [
+            {"min_quantity": 1,   "unit_price": round(base * 1.00, 2)},
+            {"min_quantity": 10,  "unit_price": round(base * 0.90, 2)},
+            {"min_quantity": 50,  "unit_price": round(base * 0.82, 2)},
+            {"min_quantity": 100, "unit_price": round(base * 0.75, 2)},
+        ]
+
     def fake_get_catalog(supplier_id):
         return {
             "supplier_id": supplier_id,
@@ -159,25 +167,35 @@ def mock_supplier_client(monkeypatch):
             "reliability": 0.95,
             "catalog": [
                 {"material_id": 1, "material_name": "ABS Filament",
-                 "base_unit_cost": 28.0, "daily_price_factor": 1.0, "current_price": 28.0},
+                 "base_unit_cost": 28.0, "daily_price_factor": 1.0, "current_price": 28.0,
+                 "stock": 500, "pricing_tiers": _tiers(28.0)},
                 {"material_id": 2, "material_name": "Stepper Motor",
-                 "base_unit_cost": 20.0, "daily_price_factor": 1.0, "current_price": 20.0},
+                 "base_unit_cost": 20.0, "daily_price_factor": 1.0, "current_price": 20.0,
+                 "stock": 500, "pricing_tiers": _tiers(20.0)},
                 {"material_id": 3, "material_name": "Control Board",
-                 "base_unit_cost": 50.0, "daily_price_factor": 1.0, "current_price": 50.0},
+                 "base_unit_cost": 50.0, "daily_price_factor": 1.0, "current_price": 50.0,
+                 "stock": 500, "pricing_tiers": _tiers(50.0)},
             ],
         }
 
-    def fake_get_pricing(supplier_id, material_id):
+    def fake_get_pricing(supplier_id, material_id, quantity=None):
         prices = {1: ("ABS Filament", 28.0), 2: ("Stepper Motor", 20.0), 3: ("Control Board", 50.0)}
-        name, price = prices.get(material_id, ("Unknown", 99.0))
+        name, base_price = prices.get(material_id, ("Unknown", 99.0))
+        # Apply tier logic: qty >= 100 → 25% discount, qty >= 10 → 10% discount, else base
+        if quantity is not None and quantity >= 100:
+            unit_price = base_price * 0.75
+        elif quantity is not None and quantity >= 10:
+            unit_price = base_price * 0.90
+        else:
+            unit_price = base_price
         return {
             "supplier_id": supplier_id,
             "supplier_name": "TestSupplier",
             "material_id": material_id,
             "material_name": name,
-            "base_unit_cost": price,
+            "base_unit_cost": base_price,
             "daily_price_factor": 1.0,
-            "current_price_per_unit": price,
+            "current_price_per_unit": unit_price,
             "lead_time_days": 2,
         }
 
@@ -187,12 +205,14 @@ def mock_supplier_client(monkeypatch):
         return {
             "id": po_id,
             "supplier_id": payload["supplier_id"],
+            "buyer": payload.get("buyer", "factory"),
             "material_id": payload["material_id"],
             "material_name": payload["material_name"],
             "quantity": payload["quantity"],
             "packaging_type": payload.get("packaging_type", "unit"),
             "issue_day": payload["issue_day"],
             "expected_delivery_day": payload["expected_delivery_day"],
+            "shipped_day": None,
             "actual_delivery_day": None,
             "status": "pending",
             "unit_cost": payload["unit_cost"],
@@ -211,6 +231,9 @@ def mock_supplier_client(monkeypatch):
     def fake_fluctuate_prices():
         pass
 
+    def fake_advance_supplier_day():
+        return {"previous_day": 1, "current_day": 2, "delivered_count": 0, "shipped_count": 0}
+
     def fake_reset_orders():
         return 0
 
@@ -222,4 +245,5 @@ def mock_supplier_client(monkeypatch):
     monkeypatch.setattr(sc, "get_due_orders", fake_get_due_orders)
     monkeypatch.setattr(sc, "deliver_order", fake_deliver_order)
     monkeypatch.setattr(sc, "fluctuate_prices", fake_fluctuate_prices)
+    monkeypatch.setattr(sc, "advance_supplier_day", fake_advance_supplier_day)
     monkeypatch.setattr(sc, "reset_orders", fake_reset_orders)
