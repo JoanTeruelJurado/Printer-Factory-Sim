@@ -21,6 +21,7 @@ from app.db.models import (
     LocalPurchaseOrder,
     ManufacturingOrder,
     Product,
+    SalesOrder,
 )
 from app.services import supplier_client
 from app.services.supplier_client import SupplierAPIError
@@ -563,6 +564,163 @@ def check_game_over(db: Session, current_day: int) -> bool:
     return False
 
 
+def process_sales_production(db: Session, current_day: int, remaining_capacity: int) -> dict:
+    """
+    Process released sales orders: consume materials and produce finished goods.
+
+    Shares the same daily_production_capacity as ManufacturingOrders.
+    Called AFTER process_production so remaining capacity is what MOs left.
+
+    Args:
+        db: Database session
+        current_day: Current simulation day
+        remaining_capacity: Units of capacity left after MO production
+
+    Returns:
+        Dict with production stats (produced, cost, assembly_hours, capacity_used)
+    """
+    daily_costs = db.query(DailyCosts).filter_by(id=1).first()
+    if not daily_costs:
+        return {"produced": 0, "cost": 0.0, "assembly_hours": 0.0, "capacity_used": 0}
+
+    released_orders = db.query(SalesOrder).filter_by(status="released").all()
+
+    total_produced = 0
+    total_production_cost = 0.0
+    total_assembly_hours = 0.0
+
+    for order in released_orders:
+        cap_left = remaining_capacity - total_produced
+        if cap_left <= 0:
+            break
+
+        units_to_produce = min(order.quantity, int(cap_left))
+        if units_to_produce == 0:
+            continue
+
+        # Check material availability (materials should be reserved already)
+        bom_lines = order.product.bom_lines
+        can_produce = True
+
+        for bom in bom_lines:
+            required = bom.qty_needed * units_to_produce
+            available = (bom.material.inventory.quantity
+                        if bom.material.inventory else 0)
+            if available < required:
+                can_produce = False
+                break
+
+        if not can_produce:
+            continue
+
+        # Consume materials (and reduce reserved)
+        for bom in bom_lines:
+            required = bom.qty_needed * units_to_produce
+            bom.material.inventory.quantity -= required
+            bom.material.inventory.reserved_quantity -= required
+
+        total_produced += units_to_produce
+
+        # Calculate production cost
+        variable_cost = units_to_produce * daily_costs.variable_cost_per_unit
+        assembly_cost = (units_to_produce * order.product.assembly_time_hours *
+                        daily_costs.energy_cost_per_hour)
+        total_production_cost += variable_cost + assembly_cost
+        total_assembly_hours += units_to_produce * order.product.assembly_time_hours
+
+        # Sales orders don't support partial production — only complete if all units done
+        if units_to_produce == order.quantity:
+            order.status = "completed"
+            order.completed_day = current_day
+            log_event(
+                db,
+                "SALES_ORDER_COMPLETED",
+                current_day,
+                "production",
+                {
+                    "sales_order_id": order.id,
+                    "product_id": order.product_id,
+                    "product_name": order.product.name,
+                    "quantity": order.quantity,
+                },
+            )
+
+    return {
+        "produced": total_produced,
+        "cost": total_production_cost,
+        "assembly_hours": total_assembly_hours,
+        "capacity_used": total_produced,
+    }
+
+
+def process_sales_shipping(db: Session, current_day: int) -> dict:
+    """
+    Ship completed sales orders. Revenue is collected on shipping.
+
+    For each completed sales order, check if there are enough finished goods
+    (completed MO quantities minus already-shipped sales order quantities).
+    If available, mark as shipped and add revenue to wallet.
+
+    Args:
+        db: Database session
+        current_day: Current simulation day
+
+    Returns:
+        Dict with shipping stats (shipped_count, revenue)
+    """
+    game_state = db.query(GameState).filter_by(id=1).first()
+    if not game_state:
+        return {"shipped_count": 0, "revenue": 0.0}
+
+    # Calculate finished goods per product:
+    # completed MO quantities - shipped/delivered sales order quantities
+    completed_mos = db.query(ManufacturingOrder).filter_by(status="completed").all()
+    finished_goods: dict[int, int] = {}
+    for mo in completed_mos:
+        finished_goods[mo.product_id] = finished_goods.get(mo.product_id, 0) + mo.quantity
+
+    # Subtract already shipped/delivered sales order quantities
+    shipped_sales = db.query(SalesOrder).filter(
+        SalesOrder.status.in_(["shipped", "delivered"])
+    ).all()
+    for so in shipped_sales:
+        finished_goods[so.product_id] = finished_goods.get(so.product_id, 0) - so.quantity
+
+    # Process completed sales orders
+    completed_orders = db.query(SalesOrder).filter_by(status="completed").all()
+    shipped_count = 0
+    total_revenue = 0.0
+
+    for order in completed_orders:
+        available = finished_goods.get(order.product_id, 0)
+        if available >= order.quantity:
+            order.status = "shipped"
+            order.shipped_day = current_day
+            game_state.wallet_balance += order.total_price
+            finished_goods[order.product_id] -= order.quantity
+            shipped_count += 1
+            total_revenue += order.total_price
+
+            log_event(
+                db,
+                "SALES_ORDER_SHIPPED",
+                current_day,
+                "financial",
+                {
+                    "sales_order_id": order.id,
+                    "product_id": order.product_id,
+                    "product_name": order.product.name,
+                    "quantity": order.quantity,
+                    "revenue": order.total_price,
+                },
+            )
+
+    return {
+        "shipped_count": shipped_count,
+        "revenue": total_revenue,
+    }
+
+
 def advance_day(db: Session) -> dict:
     """
     Advance simulation by one day.
@@ -608,17 +766,25 @@ def advance_day(db: Session) -> dict:
         # 4. Process purchase deliveries (picks up orders the supplier just marked delivered)
         deliveries = process_purchase_deliveries(db, current_day)
         
-        # 4. Process production
+        # 5. Process production (ManufacturingOrders)
         production_stats = process_production(db, current_day)
 
-        # 5. Mark expired demand orders as lost (manual fulfillment — no auto-revenue)
+        # 6. Process sales order production (released SalesOrders consume materials)
+        remaining_capacity = game_state.daily_production_capacity - production_stats["produced"]
+        sales_production_stats = process_sales_production(db, current_day, remaining_capacity)
+
+        # 7. Ship completed sales orders (completed → shipped, revenue collected)
+        sales_shipping_stats = process_sales_shipping(db, current_day)
+
+        # 8. Mark expired demand orders as lost (manual fulfillment — no auto-revenue)
         expired = mark_expired_demands(db, current_day)
 
-        # 6. Calculate costs
+        # 9. Calculate costs
         calculate_daily_costs(db, current_day)
 
-        # Deduct production costs
-        game_state.wallet_balance -= production_stats["cost"]
+        # Deduct production costs (MO + sales order production)
+        total_production_cost = production_stats["cost"] + sales_production_stats["cost"]
+        game_state.wallet_balance -= total_production_cost
 
         delayed_deliveries = supplier_day_result.get("delayed_count", 0)
 
@@ -631,8 +797,11 @@ def advance_day(db: Session) -> dict:
                 "demands_created": demands_created,
                 "deliveries": deliveries,
                 "delayed_deliveries": delayed_deliveries,
-                "produced": production_stats["produced"],
-                "production_cost": production_stats["cost"],
+                "produced": production_stats["produced"] + sales_production_stats["produced"],
+                "production_cost": total_production_cost,
+                "sales_produced": sales_production_stats["produced"],
+                "sales_shipped": sales_shipping_stats["shipped_count"],
+                "sales_revenue": sales_shipping_stats["revenue"],
                 "expired_demands": expired,
                 "wallet_balance": game_state.wallet_balance,
             },
@@ -653,8 +822,11 @@ def advance_day(db: Session) -> dict:
             "demands_created": demands_created,
             "deliveries": deliveries,
             "delayed_deliveries": delayed_deliveries,
-            "produced": production_stats["produced"],
-            "production_cost": production_stats["cost"],
+            "produced": production_stats["produced"] + sales_production_stats["produced"],
+            "production_cost": total_production_cost,
+            "sales_produced": sales_production_stats["produced"],
+            "sales_shipped": sales_shipping_stats["shipped_count"],
+            "sales_revenue": sales_shipping_stats["revenue"],
             "expired_demands": expired,
             "wallet_balance": game_state.wallet_balance,
             "game_over": is_game_over,

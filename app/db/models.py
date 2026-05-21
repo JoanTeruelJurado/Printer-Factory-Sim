@@ -183,6 +183,33 @@ class LocalPurchaseOrder(Base):
     actual_delivery_day = Column(Integer, nullable=True)
 
 
+class SalesOrder(Base):
+    """Inbound orders received from retailers."""
+
+    __tablename__ = "sales_orders"
+    __table_args__ = (CheckConstraint("quantity > 0", name="ck_sales_quantity_positive"),)
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    retailer_name = Column(String, nullable=False)
+    product_id = Column(Integer, ForeignKey("products.id"), nullable=False)
+    quantity = Column(Integer, nullable=False)
+    status = Column(
+        Enum("pending", "released", "completed", "shipped", "delivered",
+             name="sales_order_status_enum"),
+        nullable=False,
+        default="pending",
+    )
+    ordered_day = Column(Integer, nullable=False)
+    released_day = Column(Integer, nullable=True)
+    completed_day = Column(Integer, nullable=True)
+    shipped_day = Column(Integer, nullable=True)
+    delivered_day = Column(Integer, nullable=True)
+    unit_price = Column(Float, nullable=False)
+    total_price = Column(Float, nullable=False)
+
+    product = relationship("Product")
+
+
 class Config(Base):
     __tablename__ = "config"
 

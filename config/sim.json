@@ -1,0 +1,27 @@
+{
+  "retailers": [
+    {
+      "name": "PrinterWorld",
+      "url": "http://localhost:8003",
+      "port": 8003,
+      "path": ".",
+      "skill": null
+    }
+  ],
+  "manufacturer": {
+    "name": "Factory",
+    "url": "http://localhost:8002",
+    "port": 8002,
+    "path": ".",
+    "skill": "skills/manufacturer-manager.md"
+  },
+  "providers": [
+    {
+      "name": "TechSupply",
+      "url": "http://localhost:8001",
+      "port": 8001,
+      "path": ".",
+      "skill": null
+    }
+  ]
+}

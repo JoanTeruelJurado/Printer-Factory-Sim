@@ -1,12 +1,14 @@
 # 3D Printer Factory Simulator
 
-A discrete-event simulation of a 3D printer production factory connected to a live supplier microservice. You (or an AI agent) act as production planner — managing inventory, purchasing materials from suppliers, scheduling manufacturing orders, and fulfilling customer demand before your wallet runs dry.
+A discrete-event simulation of a full retail supply chain for 3D printers. Three autonomous microservices — Provider, Manufacturer, and Retailer — interact across simulated days. A Turn Engine orchestrates each day cycle, injects customer demand, and invokes AI agents at each node. You (or an AI agent) act as planner at any tier — managing inventory, purchasing, scheduling production, and fulfilling demand before the wallet runs dry.
 
 ## Tech Stack
 
-- **Factory API**: Python 3.12 + FastAPI + SQLAlchemy + SQLite (`simulator.db`, port 8000)
-- **Supplier API**: Python 3.12 + FastAPI + SQLite (`supplier.db`, port 8001) — standalone microservice the factory calls via HTTP
-- **Frontend**: React 19 + Vite 5 + TailwindCSS v3, built and served by the Factory API
+- **Provider API**: Python 3.12 + FastAPI + SQLite (`supplier.db`, port 8001) — standalone supplier microservice
+- **Manufacturer API**: Python 3.12 + FastAPI + SQLAlchemy + SQLite (`simulator.db`, port 8002) — factory production engine
+- **Retailer API**: Python 3.12 + FastAPI + SQLite (`retailer.db`, port 8003) — retail storefront and order management
+- **Frontend**: React 19 + Vite 5 + TailwindCSS v3, built and served by the Manufacturer API
+- **Turn Engine**: Python orchestrator (`turn_engine.py`) that advances all three apps in lockstep
 
 ## Quick Start
 
@@ -23,7 +25,7 @@ cd frontend && npm install && cd ..
 ./start.sh
 ```
 
-Then open **http://\<VM-IP\>:8000** in your browser.
+Then open **http://\<VM-IP\>:8002** in your browser (Manufacturer UI).
 
 > On Multipass or a remote VM, get the IP with `hostname -I`.
 
@@ -37,16 +39,18 @@ To stop everything:
 
 | Service | URL | Description |
 |---------|-----|-------------|
-| Game UI + API | http://localhost:8000 | React frontend + Factory REST API |
-| API docs | http://localhost:8000/docs | Interactive Swagger UI |
-| Supplier API | http://localhost:8001 | Supplier microservice |
-| Supplier docs | http://localhost:8001/docs | Supplier API Swagger UI |
+| Provider API | http://localhost:8001 | Supplier microservice (materials catalog, pricing, purchase orders) |
+| Provider docs | http://localhost:8001/docs | Provider API Swagger UI |
+| Manufacturer API + UI | http://localhost:8002 | React frontend + Factory REST API |
+| Manufacturer docs | http://localhost:8002/docs | Manufacturer API Swagger UI |
+| Retailer API | http://localhost:8003 | Retail storefront and order management |
+| Retailer docs | http://localhost:8003/docs | Retailer API Swagger UI |
 
 ## CLIs
 
-Both apps have a CLI for manual play or agent scripting.
+All three apps have a CLI for manual play or agent scripting.
 
-### manufacturer-cli (Factory API)
+### manufacturer-cli (Manufacturer API)
 
 ```bash
 manufacturer-cli suppliers list                           # List all suppliers
@@ -61,7 +65,7 @@ manufacturer-cli export [FILE]                            # Export factory state
 manufacturer-cli import FILE                              # Import factory state from JSON
 ```
 
-### provider-cli (Supplier API)
+### provider-cli (Provider API)
 
 ```bash
 provider-cli catalog                                      # Products with pricing tiers
@@ -77,10 +81,28 @@ provider-cli import FILE                                  # Import supplier stat
 provider-cli serve [--port 8001]                          # Start the REST API
 ```
 
+### retailer-cli (Retailer API)
+
+```bash
+retailer-cli state                                        # Wallet, day, inventory snapshot
+retailer-cli stock                                        # Finished goods on hand
+retailer-cli orders list [--status STATUS]                # List sales orders
+retailer-cli orders show ORDER_ID                         # Order detail
+retailer-cli orders fulfill ORDER_ID                      # Fulfill a sales order
+retailer-cli purchase create \
+    --product NAME --qty N                                # Place a purchase order to manufacturer
+retailer-cli purchase list [--status STATUS]              # List purchase orders from manufacturer
+retailer-cli day advance                                  # Advance one retailer day
+retailer-cli day current                                  # Current retailer day
+retailer-cli export [FILE]                                # Export retailer state to JSON
+retailer-cli import FILE                                  # Import retailer state from JSON
+retailer-cli serve [--port 8003]                          # Start the REST API
+```
+
 ## Project Layout
 
 ```
-app/                        # Factory API (port 8000)
+app/                        # Manufacturer API (port 8002)
   main.py                   # FastAPI app — serves React build + /api/* routes
   db/
     database.py             # SQLite engine and session (simulator.db)
@@ -92,7 +114,7 @@ app/                        # Factory API (port 8000)
     production.py           # Manufacturing order logic
     purchasing.py           # Purchase orders + supplier pricing
     inventory.py            # Material reservation and consumption
-    supplier_client.py      # HTTP client for the Supplier API (reads manufacturer_config.json)
+    supplier_client.py      # HTTP client for the Provider API (reads manufacturer_config.json)
     seed.py                 # Initial data seeding + reset_game
   api/
     game.py                 # Game state, day advancement, export/import endpoints
@@ -100,7 +122,7 @@ app/                        # Factory API (port 8000)
     purchasing.py           # Suppliers + purchase order endpoints
     agent.py                # GET /api/agent/context — full state for AI agents
 
-supplier_api/               # Supplier API (port 8001) — standalone microservice
+supplier_api/               # Provider API (port 8001) — standalone microservice
   main.py                   # FastAPI app entrypoint
   database.py               # SQLite engine (supplier.db)
   models.py                 # Supplier, SupplierProduct, PricingTier, Stock,
@@ -108,33 +130,66 @@ supplier_api/               # Supplier API (port 8001) — standalone microservi
   routes.py                 # All supplier endpoints (inter-service + CLI/agent)
   seed.py                   # Seeds 3 suppliers, 8 materials, 96 pricing tiers, stock
 
-frontend/                   # React SPA (built output served by FastAPI)
+retailer/                   # Retailer API (port 8003) — standalone microservice
+  main.py                   # FastAPI app entrypoint
+  database.py               # SQLite engine (retailer.db)
+  models.py                 # SalesOrder, RetailerInventory, RetailerPurchaseOrder,
+                            #   RetailerState, RetailerEvent ORM models
+  routes.py                 # Sales order, inventory, and day-advance endpoints
+  seed.py                   # Seeds initial retailer state and product catalog
+
+frontend/                   # React SPA (built output served by Manufacturer API)
   src/
     components/             # React components (GameHeader, tabs, modals)
     utils/                  # API helpers, constants
   dist/                     # Production build (generated by npm run build)
 
-tests/                      # pytest test suite (98 tests)
+turn_engine/                # Turn Engine orchestrator
+  turn_engine.py            # Main orchestrator — advances all three apps in lockstep,
+                            #   injects customer demand, invokes agent skills per role
+  config/
+    sim.json                # Simulation configuration (ports, wallet, capacity, etc.)
+  scenarios/
+    smoke-test.json         # Short smoke-test scenario (3-day run)
+  skills/
+    manufacturer-manager.md # Skill prompt for the Manufacturer agent role
+  logs/                     # Per-day, per-role log files (day-NNN-role.log)
+
+tests/                      # pytest test suite (112 tests)
   conftest.py               # In-memory SQLite fixtures, supplier_client mock
   test_inventory.py
   test_production.py
   test_purchasing.py
   test_simulation.py
   test_api.py
+  test_integration.py       # 14 cross-service integration tests
 
 manufacturer_config.json    # Declares which provider URL the manufacturer calls
-seed-provider.json          # Reproducible starting state for the Supplier API
-start.sh                    # Builds frontend, starts Supplier API + Factory API
+seed-provider.json          # Reproducible starting state for the Provider API
+start.sh                    # Builds frontend, starts all three services
 stop.sh                     # Stops all services
 ```
 
 ## Architecture
 
 ```
-Browser / AI Agent
+Turn Engine (turn_engine.py)
+  │  reads config/sim.json + scenarios/*.json
+  │  orchestrates one full day per iteration
+  │  injects customer demand → Retailer
+  │  invokes agent skills per role (skills/*.md)
+  │  writes logs/day-NNN-role.log
   │
-  ▼
-Factory API :8000  (FastAPI + SQLite: simulator.db)
+  ├────────────────────────────────────────────────────────────┐
+  │                                                            │
+  ▼                                                            ▼
+Retailer API :8003  (FastAPI + SQLite: retailer.db)      Browser / AI Agent
+  │  sales orders, inventory, day advance                      │
+  │  GET /api/agent/context — retailer state snapshot          │
+  │                                                            │
+  │  HTTP (purchase orders to manufacturer)                    │
+  ▼                                                            ▼
+Manufacturer API :8002  (FastAPI + SQLite: simulator.db) ◄─────┘
   │  serves React build at /
   │  exposes /api/* routes
   │
@@ -145,16 +200,80 @@ Factory API :8000  (FastAPI + SQLite: simulator.db)
   │
   │           HTTP (supplier_client.py — reads manufacturer_config.json)
   ▼
-Supplier API :8001  (FastAPI + SQLite: supplier.db)
+Provider API :8001  (FastAPI + SQLite: supplier.db)
   │
   ├── GET  /suppliers, /suppliers/{id}/catalog, /suppliers/{id}/pricing/{mat_id}
   ├── POST /orders          create purchase order (inter-service)
   ├── GET  /orders/due      delivered orders waiting for factory acknowledgement
   ├── PUT  /orders/{id}/deliver
   ├── POST /prices/fluctuate
-  ├── POST /api/day/advance  advance supplier day (called by factory advance_day)
+  ├── POST /api/day/advance  advance supplier day (called by manufacturer advance_day)
   └── GET/POST /api/*        CLI/agent endpoints (catalog, stock, orders, day, export/import)
 ```
+
+## Week 7: Retail Supply Chain Orchestration
+
+Week 7 extends the two-server system into a full three-tier supply chain and introduces a Turn Engine that orchestrates all apps in lockstep.
+
+### Three-App Overview
+
+| App | Role | Port | DB |
+|-----|------|------|----|
+| Provider | Raw material supplier | 8001 | supplier.db |
+| Manufacturer | Factory — buys from Provider, sells to Retailer | 8002 | simulator.db |
+| Retailer | Storefront — buys from Manufacturer, sells to end customers | 8003 | retailer.db |
+
+Each app is independently runnable and exposes a `GET /api/agent/context` snapshot endpoint. Apps are decoupled: the Retailer only knows the Manufacturer's URL, and the Manufacturer only knows the Provider's URL.
+
+### Turn Engine
+
+The Turn Engine (`turn_engine/turn_engine.py`) is the single orchestrator responsible for progressing the simulation. It reads a config file and an optional scenario file, then for each day:
+
+1. Injects synthetic customer demand orders into the Retailer
+2. Calls `POST /api/game/advance-day` on the Retailer
+3. Calls `POST /api/game/advance-day` on the Manufacturer (which also advances the Provider)
+4. Invokes the configured agent skill for each role, passing the full context snapshot
+5. Writes structured logs to `logs/day-NNN-role.log`
+
+**Running the Turn Engine:**
+
+```bash
+# Run a 3-day smoke test
+python turn_engine/turn_engine.py \
+    turn_engine/config/sim.json \
+    turn_engine/scenarios/smoke-test.json \
+    3
+
+# Run for N days with default config (no scenario file)
+python turn_engine/turn_engine.py turn_engine/config/sim.json 10
+```
+
+**`turn_engine/config/sim.json`** declares service URLs, starting wallet, production capacity, and agent model settings.
+
+**`turn_engine/scenarios/smoke-test.json`** defines a reproducible demand sequence for integration testing.
+
+### Skill Files
+
+Skill files in `turn_engine/skills/` are Markdown prompt documents that define how an AI agent should behave at each supply chain node. The Turn Engine injects the agent context snapshot and runs the skill via the configured model.
+
+| File | Role |
+|------|------|
+| `skills/manufacturer-manager.md` | Guides the Manufacturer agent: when to buy materials, release MOs, and fulfill demand |
+
+Each skill document describes the agent's goals, decision heuristics, available CLI commands, and output format.
+
+### Logs and Analysis
+
+Each Turn Engine run writes one log file per role per day:
+
+```
+logs/day-001-manufacturer.log
+logs/day-001-retailer.log
+logs/day-002-manufacturer.log
+...
+```
+
+Log files contain the full agent context snapshot, the skill prompt, the agent's reasoning, and any CLI commands issued. Use these for debugging agent behaviour or auditing supply chain decisions.
 
 ## Gameplay Loop
 
@@ -217,10 +336,30 @@ source venv/bin/activate
 pytest tests/ -v
 ```
 
-98 tests across 5 files. The supplier API is fully mocked — no running services needed.
+112 tests across 6 files. The Provider API is fully mocked in unit tests — no running services needed. The 14 integration tests in `test_integration.py` require all three services to be running.
 
 ## Environment Variables
 
 ```env
-SUPPLIER_API_URL=http://localhost:8001   # Override the URL from manufacturer_config.json
+SUPPLIER_API_URL=http://localhost:8001   # Override the provider URL from manufacturer_config.json
 ```
+
+## Troubleshooting
+
+**Port already in use**
+`start.sh` kills existing processes on ports 8001–8003 before starting. If a service still fails to bind, run `./stop.sh` then `./start.sh` again.
+
+**Manufacturer cannot reach Provider**
+Check `manufacturer_config.json` at the project root. The `provider_url` field must match the address where the Provider API is listening. The `SUPPLIER_API_URL` env var overrides this at runtime.
+
+**Retailer cannot reach Manufacturer**
+The Retailer reads its manufacturer URL from its own config (or env var). Verify the Manufacturer API is running on port 8002 before starting the Retailer.
+
+**Turn Engine exits immediately**
+Ensure all three services are running before invoking the Turn Engine. The engine performs a health check against each configured URL on startup and aborts if any service is unreachable.
+
+**Tests fail with database errors**
+Unit tests use an in-memory `StaticPool` SQLite database — they never touch `simulator.db` or `supplier.db`. If tests fail with schema errors, the ORM models may be out of sync with the test fixtures. Run `pytest tests/ -v --tb=short` for details.
+
+**Frontend shows stale data after reset**
+The React SPA does not auto-refresh on server-side reset. Reload the page manually (`Ctrl+R`) after calling `POST /api/game/reset`.

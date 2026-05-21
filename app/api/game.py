@@ -251,6 +251,51 @@ def fulfill_demand_manually(demand_id: int, db: Session = Depends(get_db)) -> di
     }
 
 
+@router.put("/products/{product_id}/price")
+def update_product_price(
+    product_id: int,
+    body: dict = Body(...),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Update the sell_price of a product."""
+    product = db.query(Product).filter(Product.id == product_id).first()
+    if not product:
+        raise HTTPException(status_code=404, detail="Product not found")
+
+    new_price = body.get("sell_price")
+    if new_price is None or not isinstance(new_price, (int, float)) or new_price < 0:
+        raise HTTPException(status_code=422, detail="sell_price must be a non-negative number")
+
+    old_price = product.sell_price
+    product.sell_price = float(new_price)
+
+    state = db.query(GameState).filter(GameState.id == 1).first()
+    current_day = state.current_day if state else 0
+
+    from app.services.simulation import log_event
+    log_event(
+        db,
+        "PRODUCT_PRICE_UPDATED",
+        current_day,
+        "financial",
+        {
+            "product_id": product.id,
+            "product_name": product.name,
+            "old_price": old_price,
+            "new_price": product.sell_price,
+        },
+    )
+
+    db.commit()
+    return {
+        "success": True,
+        "product_id": product.id,
+        "product_name": product.name,
+        "old_price": old_price,
+        "new_price": product.sell_price,
+    }
+
+
 @router.post("/advance-day")
 def advance_day_endpoint(db: Session = Depends(get_db)) -> dict:
     """Advance simulation by one day."""

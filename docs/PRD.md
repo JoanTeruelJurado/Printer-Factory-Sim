@@ -825,6 +825,293 @@ Configurable parameters:
 
 ---
 
+## 13. Week 7 — Retail Supply Chain & Agent Orchestration
+
+### 13.1 Overview
+
+Week 7 extends the two-app system (Provider + Manufacturer) into a full three-tier retail supply chain. A new Retailer application sits between end customers and the Manufacturer, placing production orders and selling finished printers to the public. An external Turn Engine orchestrates simulated days across all three apps in sequence. AI agent skills replace manual decision-making for each role.
+
+### 13.2 Three-App Architecture
+
+```
+Provider :8001  (supplier.db)
+    │  raw material orders
+    ▼
+Manufacturer :8002  (simulator.db)
+    │  finished printer orders (SalesOrders)
+    ▼
+Retailer :8003  (retailer.db)
+    │  retail sales
+    ▼
+End Customers
+```
+
+Each app has its own SQLite database and communicates with adjacent apps exclusively via REST. No shared database connections exist across app boundaries.
+
+| App | Port | Database | Role |
+|-----|------|----------|------|
+| Provider | 8001 | supplier.db | Raw material supplier |
+| Manufacturer | 8002 | simulator.db | Factory production |
+| Retailer | 8003 | retailer.db | Retail sales |
+
+### 13.3 Retailer Application (Port 8003)
+
+#### 13.3.1 Catalog Management
+
+The retailer sells two printer models sourced from the Manufacturer:
+
+| SKU | Name | Description |
+|-----|------|-------------|
+| P3D-Classic | P3D-Classic | Entry-level 3D printer |
+| P3D-Pro | P3D-Pro | Professional 3D printer |
+
+Catalog entries store the retail sell price, the manufacturer product ID used when placing purchase orders, and current stock levels.
+
+#### 13.3.2 Customer Order Handling
+
+- Customer orders arrive as inbound requests specifying SKU and quantity.
+- On receipt, the retailer attempts immediate fulfillment from available stock.
+- If sufficient stock exists: order status set to `fulfilled`, stock decremented.
+- If stock is insufficient: order status set to `backordered`, and a purchase order is automatically raised to the Manufacturer for the shortfall.
+- Backorders are fulfilled automatically during day advancement when the corresponding Manufacturer delivery arrives.
+
+#### 13.3.3 Purchase Orders to Manufacturer
+
+- Retailer places purchase orders against the Manufacturer's sales order API (`POST /api/sales-orders`).
+- Purchase order tracks: SKU, quantity, order day, expected delivery day, status (`pending` / `shipped` / `delivered`).
+- Payment is deducted from the retailer wallet on order placement.
+- Delivered stock is added to retailer inventory during the day-advance cycle.
+
+#### 13.3.4 Stock Tracking
+
+- Per-SKU stock levels tracked in `retailer.db`.
+- Stock is decremented on customer fulfillment and incremented on Manufacturer delivery.
+- Low-stock threshold configurable; alerts logged as events.
+
+#### 13.3.5 Wallet Management
+
+- Starting wallet: €50,000 (configurable on reset).
+- Income: customer order payments on fulfillment.
+- Expenses: purchase orders to Manufacturer, daily fixed operating costs.
+- Wallet check enforced before placing purchase orders (no overdraft).
+
+#### 13.3.6 Day Advancement
+
+On `POST /api/day/advance`:
+1. Process incoming Manufacturer deliveries → increment stock, fulfill backorders.
+2. Apply daily fixed operating costs.
+3. Log all events.
+4. Increment current day.
+
+#### 13.3.7 Retailer API Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/state` | Retailer game state (day, wallet, stock) |
+| GET | `/api/catalog` | List all SKUs with stock and pricing |
+| POST | `/api/orders` | Place a customer order |
+| GET | `/api/orders` | List customer orders (optional `?status=`) |
+| GET | `/api/orders/{id}` | Customer order detail |
+| POST | `/api/purchase-orders` | Place purchase order to Manufacturer |
+| GET | `/api/purchase-orders` | List all purchase orders |
+| POST | `/api/day/advance` | Advance retailer day |
+| GET | `/api/export` | Export retailer state as JSON |
+| POST | `/api/import` | Restore retailer state from JSON |
+| POST | `/api/reset` | Reset retailer to day 1 |
+| GET | `/api/agent/context` | Full state snapshot for AI agents |
+
+### 13.4 Sales Orders (Manufacturer)
+
+Sales orders replace the stochastic demand order system for inter-app flow. Instead of random demand generation, the Manufacturer receives explicit orders from the Retailer via the sales order API.
+
+#### 13.4.1 SalesOrder Model
+
+```
+SalesOrder
+  id              INTEGER PK
+  retailer_id     INTEGER           -- identifies the requesting retailer
+  product_id      INTEGER FK → products
+  quantity        INTEGER
+  created_day     INTEGER
+  due_day         INTEGER
+  status          TEXT              -- pending | released | completed | shipped | delivered
+  fulfilled_qty   INTEGER DEFAULT 0
+  unit_price      REAL              -- agreed price at order time
+  total_value     REAL
+```
+
+#### 13.4.2 Status Lifecycle
+
+```
+pending
+   │  (MO created and released)
+   ▼
+released
+   │  (production completes in advance_day)
+   ▼
+completed
+   │  (Manufacturer ships to Retailer)
+   ▼
+shipped
+   │  (Retailer advances day and receives delivery)
+   ▼
+delivered
+```
+
+- Materials are reserved against inventory when the sales order transitions to `released`.
+- Production is processed as part of the normal `advance_day` cycle alongside internal manufacturing orders.
+- On completion, the Manufacturer marks the order `shipped` and notifies the Retailer (or the Turn Engine triggers the Retailer advance which polls for shipped orders).
+
+#### 13.4.3 Manufacturer Sales Order API Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/api/sales-orders` | Create a new sales order from Retailer |
+| GET | `/api/sales-orders` | List all sales orders (optional `?status=`) |
+| GET | `/api/sales-orders/{id}` | Sales order detail |
+| PUT | `/api/sales-orders/{id}/release` | Release to production (reserve materials) |
+| PUT | `/api/sales-orders/{id}/ship` | Mark order as shipped |
+| GET | `/api/sales-orders/due?day=N` | Orders completed and ready to ship |
+
+### 13.5 Turn Engine Orchestration
+
+The Turn Engine is an external Python script that drives one simulated calendar day across all three apps in a deterministic sequence. It decouples orchestration from application business logic.
+
+#### 13.5.1 Invocation
+
+```bash
+python turn_engine.py config/sim.json scenarios/smoke-test.json 3
+```
+
+Arguments:
+- `config/sim.json` — base configuration (app URLs, timeouts, log directory)
+- `scenarios/smoke-test.json` — scenario definition (initial state, agent skill overrides, number of days)
+- `3` — number of days to simulate in this run
+
+#### 13.5.2 Day Cycle Sequence
+
+For each simulated day the Turn Engine executes the following steps in order:
+
+```
+1. inject_demand(retailer)
+      POST /api/orders  — inject customer orders per scenario demand profile
+
+2. retailer_decisions(retailer)
+      invoke agent skill: skills/retailer-manager.md
+      agent reads GET /api/agent/context, decides purchase orders to Manufacturer
+
+3. manufacturer_decisions(manufacturer)
+      invoke agent skill: skills/manufacturer-manager.md
+      agent reads GET /api/agent/context, decides MOs to release, POs to Provider
+
+4. provider_decisions(provider)
+      invoke agent skill: skills/provider-manager.md
+      agent reads GET /api/catalog and /api/stock, adjusts pricing tiers or restock
+
+5. advance_provider(provider)
+      POST /api/day/advance  — ships pending orders, replenishes stock, increments day
+
+6. advance_manufacturer(manufacturer)
+      POST /api/game/advance-day  — fluctuates prices, processes deliveries, runs
+                                     production, deducts costs, increments day
+
+7. advance_retailer(retailer)
+      POST /api/day/advance  — processes Manufacturer deliveries, fulfills
+                                backorders, deducts costs, increments day
+
+8. log_day_summary()
+      write logs/day-NNN-summary.json with wallet balances and key metrics
+```
+
+#### 13.5.3 Configuration Files
+
+`config/sim.json`:
+```json
+{
+    "apps": {
+        "provider":     { "url": "http://localhost:8001" },
+        "manufacturer": { "url": "http://localhost:8002" },
+        "retailer":     { "url": "http://localhost:8003" }
+    },
+    "agent_timeout_seconds": 180,
+    "log_dir": "logs"
+}
+```
+
+`scenarios/smoke-test.json`:
+```json
+{
+    "name": "smoke-test",
+    "days": 3,
+    "daily_demand": [
+        { "sku": "P3D-Classic", "quantity": 2 },
+        { "sku": "P3D-Pro",     "quantity": 1 }
+    ],
+    "agent_skills": {
+        "retailer":     "skills/retailer-manager.md",
+        "manufacturer": "skills/manufacturer-manager.md",
+        "provider":     null
+    }
+}
+```
+
+### 13.6 Agent Skill System
+
+Each app role is driven by a Claude agent invoked via `claude --print`. Skill files are markdown documents that describe the decision framework for that role.
+
+#### 13.6.1 Skill Invocation
+
+The Turn Engine invokes an agent skill as:
+
+```bash
+claude --print "$(cat skills/manufacturer-manager.md)\n\n## Current Context\n$(curl -s http://localhost:8002/api/agent/context)"
+```
+
+- Timeout: 180 seconds per invocation.
+- stdout is captured to `logs/day-NNN-<role>.log`.
+- The agent is expected to emit a sequence of `curl` or structured API call commands that the Turn Engine parses and executes, or the agent calls the APIs directly using tool use if running in an agentic context.
+
+#### 13.6.2 Skill Files
+
+| File | Role | Responsibility |
+|------|------|---------------|
+| `skills/manufacturer-manager.md` | Manufacturer agent | Decide which MOs to release, which raw materials to purchase, based on open sales orders, inventory levels, wallet balance, and supplier pricing |
+| `skills/retailer-manager.md` | Retailer agent | Decide how many units of each SKU to order from the Manufacturer based on current stock, pending customer backorders, and wallet balance |
+| `skills/provider-manager.md` | Provider agent | Optionally adjust pricing tiers or trigger restocks; normally a no-op unless scenario overrides |
+
+#### 13.6.3 manufacturer-manager.md Decision Framework
+
+The manufacturer agent follows this logic on each turn:
+
+1. Read `/api/agent/context` — open sales orders, inventory, wallet, BOM, supplier pricing.
+2. For each open sales order: check if materials are available; if yes, release an MO.
+3. For any material shortage: compute quantity needed across all pending sales orders; issue purchase orders using the best-priced supplier tier that fits within wallet constraints.
+4. Prioritise orders with the nearest due day.
+5. Do not over-commit wallet: leave a buffer of at least €1,000.
+
+#### 13.6.4 Log Artifacts
+
+Each day produces:
+- `logs/day-NNN-retailer.log` — raw agent output for retailer decisions
+- `logs/day-NNN-manufacturer.log` — raw agent output for manufacturer decisions
+- `logs/day-NNN-provider.log` — raw agent output for provider decisions (if skill active)
+- `logs/day-NNN-summary.json` — structured metrics snapshot
+
+### 13.7 Week 7 Acceptance Criteria
+
+- [ ] Retailer app starts on port 8003 with €50,000 starting wallet and P3D-Classic / P3D-Pro catalog
+- [ ] Customer orders auto-fulfill from stock or backorder correctly
+- [ ] Retailer purchase orders reach Manufacturer and create SalesOrders
+- [ ] SalesOrder lifecycle transitions correctly: pending → released → completed → shipped → delivered
+- [ ] Materials are reserved on SalesOrder release and consumed on production completion
+- [ ] Turn Engine runs a 3-day smoke-test scenario end-to-end without errors
+- [ ] All three apps advance in lockstep (same simulated day after each Turn Engine cycle)
+- [ ] Agent skills produce valid API calls within the 180s timeout
+- [ ] Day logs written to `logs/` for each simulated day
+- [ ] All existing 98 tests continue to pass after Manufacturer changes
+
+---
+
 ## 12. Appendix
 
 ### A. Example Initial Data
