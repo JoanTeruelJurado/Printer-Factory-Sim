@@ -1,1129 +1,763 @@
-# 3D Printer Factory Simulator - Product Requirements Document (PRD)
+# 3D Printer Factory Simulator — Product Requirements Document
+
+**Version:** 3.0
+**Date:** 2026-05-28
+**Status:** Complete — All phases delivered
+
+---
 
 ## 1. Executive Summary
 
 ### 1.1 Objective
-Build a discrete-event simulation system that models the full production cycle of a factory manufacturing 3D printers. The user acts as production planner, making decisions about what to manufacture and what materials to purchase while managing inventory, costs, and production capacity.
+
+Build a discrete-event simulation system that models the full production cycle of a factory manufacturing 3D printers. The system spans three independent applications — a raw-material Provider, a Manufacturer, and a Retailer — each with its own database, communicating exclusively over HTTP. The user (or an AI agent) acts as production planner at any tier, making decisions about manufacturing, purchasing, pricing, and fulfillment while managing inventory, costs, and capacity. Autonomous AI agents can run all three roles simultaneously, driven by a Turn Engine that advances every app in lockstep one simulated day at a time.
 
 ### 1.2 Core Gameplay Loop
+
 ```
-┌─────────────┐    ┌──────────────┐    ┌─────────────┐
-│   Advance   │───▶│  New Orders  │───▶│   User      │
-│    Day      │    │  Generated   │    │  Decisions  │
-└─────────────┘    └──────────────┘    └─────────────┘
-       ▲                                      │
-       │                                      ▼
-       │    ┌──────────────┐    ┌─────────────┐
-       └────│ Events       │◀───│  Simulation │
-            │ Logged       │    │  Processed  │
-            └──────────────┘    └─────────────┘
+┌───────────────┐    ┌──────────────────┐    ┌────────────────┐
+│  Turn Engine  │───▶│  Demand Injected │───▶│  Agent / User  │
+│  advances day │    │  into Retailer   │    │  Decisions     │
+└───────────────┘    └──────────────────┘    └────────────────┘
+        ▲                                            │
+        │                                            ▼
+        │    ┌──────────────────┐    ┌───────────────────────┐
+        └────│  Events Logged   │◀───│  All Three Apps       │
+             │  Metrics Written │    │  Process Their Turn   │
+             └──────────────────┘    └───────────────────────┘
 ```
+
+The game ends at the Manufacturer if its wallet goes negative for 3 consecutive days.
 
 ### 1.3 Success Criteria
-- Fully functional web-based simulator accessible from any browser
-- Complete REST API with automatic OpenAPI documentation
-- Import/export capability for game state
-- Game enforcement: wallet cannot go negative, warehouse has capacity limits
+
+- Three independently deployable FastAPI apps with separate SQLite databases
+- React 19 SPA served by the Manufacturer API, full tab-based UI
+- Turn Engine orchestrates all three apps per simulated day
+- Three autonomous Claude agents (one per role) run autonomously via `claude --print`
+- Two named scenarios (calm-market, holiday-rush) with compound event support
+- Per-app metrics tables enable post-run time-series analysis
+- `analysis.py` generates four matplotlib charts from metrics databases
+- SimDashboard frontend tab with autopilot and scenario selector
+- 112 automated tests, all passing
 
 ---
 
-## 2. Tech Stack
+## 2. System Architecture
 
-| Layer | Technology | Rationale |
-|-------|------------|-----------|
-| **Language** | Python 3.11+ | Readability, extensive libraries, cross-platform |
-| **Backend Framework** | FastAPI | Async support, automatic OpenAPI docs, Pydantic validation |
-| **Simulation Engine** | Custom discrete-event loop | Turn-based day progression matches gameplay needs better than SimPy's continuous event queue |
-| **Database** | SQLite | ACID compliance, concurrent access, easy backup/export |
-| **Frontend** | Vanilla HTML/CSS/JavaScript | No build tools required, full control over UX, minimal dependencies |
-| **Charts** | matplotlib + base64 embedding | Streamlit-like chart generation compatible with FastAPI |
-| **Serialization** | JSON | Human-readable export format |
-| **Version Control** | Git + GitHub | Standard workflow |
-
-### 2.1 Why Custom Simulation Over SimPy?
-While SimPy is excellent for continuous simulation, our turn-based "Advance Day" mechanic maps more naturally to a simplified custom event loop:
-- Day boundaries are explicit game mechanics, not just observation points
-- User decisions happen at specific points in the day (after demand generation, before processing)
-- Easier to explain and debug for educational purposes
-
----
-
-## 3. Data Model
-
-### 3.1 Entity Relationship Diagram
+### 2.1 Three-App Design
 
 ```
-┌──────────────┐       ┌──────────────┐       ┌──────────────┐
-│    Client    │       │  DemandOrder │       │  Manufacturer│
-├──────────────┤       ├──────────────┤       ├──────────────┤
-│ id (PK)      │───┐   │ id (PK)      │       │ id (PK)      │
-│ name         │   └──▶│ client_id(FK)│       │ name         │
-└──────────────┘       │ product_id(FK)│      └──────────────┘
-                       │ quantity     │              │
-                       │ due_date     │              │ consumes
-                       │ status       │              │
-                       │ penalty_amt  │              │
-                       │ created_day  │              │
-                       └──────────────┘              │
-                            │                        │
-                            │ produces               │
-                            ▼                        ▼
-┌──────────────┐       ┌──────────────┐       ┌──────────────┐
-│    Product   │◀──────│     BOM      │───────│RawMaterial   │
-├──────────────┤       ├──────────────┤       ├──────────────┤
-│ id (PK)      │       │ id (PK)      │       │ id (PK)      │
-│ name         │       │ product_id   │       │ name         │
-│ type         │       │ material_id  │       │ base_price   │
-│ status       │       │ qty_needed   │       └──────────────┘
-│ sell_price   │       └──────────────┘              │
-└──────────────┘                                      │
-         │                                            │
-         │ sells to                                   │ sourced from
-         ▼                                            ▼
-┌──────────────┐       ┌──────────────┐       ┌──────────────┐
-│   Customer   │       │  Supplier    │       │ PurchaseOrd  │
-├──────────────┤       ├──────────────┤       ├──────────────┤
-│ id (PK)      │       │ id (PK)      │       │ id (PK)      │
-│ name         │       │ name         │       │ supplier_id  │
-│ contact      │       │ products[]   │       │ material_id  │
-└──────────────┘       │ lead_time    │       │ quantity     │
-                       │ min_qty      │       │ issue_day    │
-                       └──────────────┘       │ expected_day │
-                           │                  │ status       │
-                           │ delivers         │ total_cost   │
-                           ▼                  └──────────────┘
-                    ┌──────────────┐                   │
-                    │  Inventory   │◀──────────────────┘
-                    ├──────────────┤
-                    │ product_id   │
-                    │ quantity     │
-                    └──────────────┘
+Turn Engine (orchestrator)
+  │  reads config/sim.json + scenarios/*.json
+  │  advances all three apps in lockstep each turn
+  │
+  ├─────────────────────────────────────────────────────────────┐
+  │                                                             │
+  ▼                                                             ▼
+Provider API :8001                                    Retailer API :8003
+(FastAPI + SQLite: supplier.db)                       (FastAPI + SQLite: retailer.db)
+  │                                                             │
+  │  raw material orders via supplier_client.py                 │  finished printer orders via retailer purchase client
+  ▼                                                             │
+Manufacturer API :8002  ◀────────────────────────────────────────┘
+(FastAPI + SQLite: simulator.db)
+  │  serves React 19 SPA at /
+  └─ /api/* routes
 ```
 
-### 3.2 Schema Definitions (SQLite)
+No app touches another app's database directly. All cross-service communication goes through HTTP clients.
 
-#### Products Table
-```sql
-CREATE TABLE products (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL UNIQUE,
-    product_type TEXT NOT NULL CHECK(product_type IN ('raw', 'finished')),
-    status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'discontinued')),
-    sell_price REAL,  -- NULL for raw materials
-    assembly_time_hours REAL NOT NULL DEFAULT 0  -- For finished products only
-);
-```
-
-#### RawMaterials Table
-```sql
-CREATE TABLE raw_materials (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL UNIQUE,
-    base_price REAL NOT NULL,  -- Base price per unit
-    volume_per_unit REAL NOT NULL DEFAULT 1  -- Storage volume units
-);
-```
-
-#### Clients Table
-```sql
-CREATE TABLE clients (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL UNIQUE
-);
-```
-
-#### BillOfMaterials (BOM) Table
-```sql
-CREATE TABLE bom (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    product_id INTEGER NOT NULL,
-    material_id INTEGER NOT NULL,
-    qty_needed REAL NOT NULL CHECK(qty_needed > 0),
-    FOREIGN KEY (product_id) REFERENCES products(id),
-    FOREIGN KEY (material_id) REFERENCES raw_materials(id),
-    UNIQUE(product_id, material_id)
-);
-```
-
-#### Suppliers Table
-```sql
-CREATE TABLE suppliers (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL UNIQUE,
-    lead_time_days INTEGER NOT NULL CHECK(lead_time_days >= 0),
-    reliability REAL NOT NULL DEFAULT 1.0 CHECK(reliability BETWEEN 0 AND 1)  -- Delay probability factor
-);
-```
-
-#### SupplierProducts Table (Catalog with pricing tiers)
-```sql
-CREATE TABLE supplier_products (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    supplier_id INTEGER NOT NULL,
-    material_id INTEGER NOT NULL,
-    base_unit_cost REAL NOT NULL,  -- Base cost per unit
-    daily_price_factor REAL NOT NULL DEFAULT 1.0,  -- Random fluctuation multiplier
-    packaging_options TEXT NOT NULL DEFAULT '{"unit": 1, "box": 20, "pallet": 1000}',  -- JSON
-    FOREIGN KEY (supplier_id) REFERENCES suppliers(id),
-    FOREIGN KEY (material_id) REFERENCES raw_materials(id),
-    UNIQUE(supplier_id, material_id)
-);
-```
-
-#### Inventory Table
-```sql
-CREATE TABLE inventory (
-    material_id INTEGER PRIMARY KEY,
-    quantity REAL NOT NULL DEFAULT 0 CHECK(quantity >= 0),
-    reserved_quantity REAL NOT NULL DEFAULT 0 CHECK(reserved_quantity >= 0),
-    FOREIGN KEY (material_id) REFERENCES raw_materials(id)
-);
-```
-
-#### ManufacturingOrders Table
-```sql
-CREATE TABLE manufacturing_orders (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    product_id INTEGER NOT NULL,
-    quantity INTEGER NOT NULL CHECK(quantity > 0),
-    created_day INTEGER NOT NULL,
-    release_day INTEGER,  -- NULL if not yet released
-    completed_day INTEGER,  -- NULL if not completed
-    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'released', 'completed', 'cancelled')),
-    remaining_qty INTEGER NOT NULL DEFAULT 0,  -- For partial completion tracking
-    FOREIGN KEY (product_id) REFERENCES products(id)
-);
-```
-
-#### DemandOrders Table (Sales orders from clients)
-```sql
-CREATE TABLE demand_orders (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    client_id INTEGER NOT NULL,
-    product_id INTEGER NOT NULL,
-    quantity INTEGER NOT NULL CHECK(quantity > 0),
-    request_day INTEGER NOT NULL,
-    due_day INTEGER NOT NULL,
-    status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open', 'fulfilled', 'partial', 'lost')),
-    fulfilled_qty INTEGER NOT NULL DEFAULT 0,
-    penalty_amount REAL NOT NULL DEFAULT 0,  -- Applied if lost/partial
-    FOREIGN KEY (client_id) REFERENCES clients(id),
-    FOREIGN KEY (product_id) REFERENCES products(id)
-);
-```
-
-#### PurchaseOrders Table
-```sql
-CREATE TABLE purchase_orders (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    supplier_id INTEGER NOT NULL,
-    material_id INTEGER NOT NULL,
-    quantity INTEGER NOT NULL CHECK(quantity > 0),
-    packaging_type TEXT NOT NULL,  -- 'unit', 'box', or 'pallet'
-    issue_day INTEGER NOT NULL,
-    expected_delivery_day INTEGER NOT NULL,
-    actual_delivery_day INTEGER,  -- NULL until delivered
-    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'delivered', 'delayed', 'cancelled')),
-    unit_cost REAL NOT NULL,  -- Cost per unit at time of order
-    total_cost REAL NOT NULL,
-    FOREIGN KEY (supplier_id) REFERENCES suppliers(id),
-    FOREIGN KEY (material_id) REFERENCES raw_materials(id)
-);
-```
-
-#### DailyCosts Table (Configuration for operational expenses)
-```sql
-CREATE TABLE daily_costs (
-    id INTEGER PRIMARY KEY CHECK(id = 1),  -- Singleton
-    fixed_cost REAL NOT NULL DEFAULT 0,  -- Rent, salaries, etc.
-    variable_cost_per_unit REAL NOT NULL DEFAULT 0,  -- Per printer produced
-    energy_cost_per_hour REAL NOT NULL DEFAULT 0,  -- Per assembly hour
-    maintenance_percentage REAL NOT NULL DEFAULT 0  -- Percentage of total costs
-);
-```
-
-#### GameState Table
-```sql
-CREATE TABLE game_state (
-    id INTEGER PRIMARY KEY CHECK(id = 1),  -- Singleton
-    current_day INTEGER NOT NULL DEFAULT 1,
-    wallet_balance REAL NOT NULL DEFAULT 10000.0,
-    warehouse_capacity INTEGER NOT NULL DEFAULT 10000,
-    daily_production_capacity INTEGER NOT NULL DEFAULT 10,
-    days_with_negative_balance INTEGER NOT NULL DEFAULT 0,
-    game_over BOOLEAN NOT NULL DEFAULT FALSE,
-    last_updated TEXT NOT NULL DEFAULT (datetime('now'))
-);
-```
-
-#### Events Table (Audit log)
-```sql
-CREATE TABLE events (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    event_type TEXT NOT NULL,
-    sim_day INTEGER NOT NULL,
-    timestamp TEXT NOT NULL DEFAULT (datetime('now')),
-    details TEXT NOT NULL,  -- JSON blob with event-specific data
-    category TEXT NOT NULL DEFAULT 'general' CHECK(category IN ('production', 'purchase', 'demand', 'inventory', 'financial', 'system', 'alert'))
-);
-CREATE INDEX idx_events_day ON events(sim_day);
-CREATE INDEX idx_events_type ON events(event_type);
-```
-
-#### Configuration Table
-```sql
-CREATE TABLE config (
-    key TEXT PRIMARY KEY,
-    value TEXT NOT NULL,  -- JSON value
-    description TEXT
-);
-```
-
----
-
-## 4. Functional Requirements
-
-### R0 — Initial Configuration
-
-#### R0.1 Bill of Materials (BOM)
-Define material requirements for each printer model:
-- Each finished product has a BOM listing required raw materials and quantities
-- BOM is editable via API/UI
-
-#### R0.2 Assembly Time
-- Each product has an assembly time in hours
-- Determines production throughput within daily capacity
-
-#### R0.3 Supplier Catalog
-- Products for sale with prices by packaging tier (unit/box/pallet)
-- Lead time configuration per supplier
-- Daily price fluctuation (±10% random variation)
-
-#### R0.4 Warehouse Capacity
-- Configurable maximum storage volume
-- Each raw material unit occupies 1 volume unit (simplified model)
-- UI warning when approaching capacity (>80%)
-
-### R1 — Demand Generation
-
-#### R1.1 Daily Order Creation
-At start of each simulated day:
-- Generate 0-N demand orders based on configurable distribution
-- Mean and variance parameters configurable globally or per-product
-- Due dates randomly assigned (typically 3-7 days from creation)
-
-#### R1.2 Configuration Parameters
-```json
-{
-    "demand_generation": {
-        "orders_per_day_mean": 3,
-        "orders_per_day_variance": 2,
-        "due_date_min_days": 3,
-        "due_date_max_days": 7,
-        "product_selection_mode": "weighted_random",
-        "product_weights": {"printer_A": 0.5, "printer_B": 0.3, "printer_C": 0.2}
-    }
-}
-```
-
-### R2 — Control Dashboard
-
-Display real-time information:
-- **Current simulated day** and game status
-- **Pending manufacturing orders** with BOM breakdown
-- **Inventory levels** with shortage indicators
-- **Open demand orders** with deadline countdown
-- **Wallet balance** with alert thresholds
-
-### R3 — User Decisions
-
-#### R3.1 Release Production Orders
-- Select pending manufacturing orders to release
-- Must specify quantity ≤ daily remaining capacity
-- Orders can be partially released (remaining quantity stays pending)
-- Material reservation occurs upon release
-
-#### R3.2 Issue Purchase Orders
-- Select supplier and material
-- Choose packaging tier (affects quantity and price)
-- System validates:
-  - Wallet can cover cost (no overdraft allowed)
-  - Warehouse has available capacity
-- Order issued immediately, delivery scheduled per lead time
-
-#### R3.3 Cancel Orders
-- Cancel unreleased manufacturing orders (no penalty)
-- Cancel pending purchase orders (may have cancellation fee configured)
-
-### R4 — Event Simulation
-
-#### R4.1 Production Processing
-During daily simulation cycle:
-1. Check released orders have materials reserved
-2. Consume materials according to BOM
-3. Produce finished goods up to daily capacity
-4. Update order status (completed/partially completed)
-
-#### R4.2 Purchase Arrivals
-- Calculate expected deliveries based on issue_day + lead_time
-- Apply reliability factor for potential delays
-- Add received quantities to inventory
-- Deduct payment from wallet
-
-#### R4.3 Daily Operational Costs
-```
-Daily Total = Fixed Cost + (Units Produced × Variable Cost) + (Assembly Hours × Energy Cost) × (1 + Maintenance %)
-```
-
-#### R4.4 Demand Fulfillment
-At end of each day:
-- Check completed orders against open demand orders
-- Match supply to demand (FIFO by demand creation date)
-- Mark demand as fulfilled/partial/lost
-- Apply penalties for missed deliveries
-
-### R5 — Calendar Advance
-
-#### R5.1 Advance Day Button
-Triggers complete 24h simulation cycle:
-1. Increment day counter
-2. Generate new demand orders
-3. Process pending purchase deliveries
-4. Process production (up to capacity)
-5. Fulfill demand orders
-6. Calculate and deduct daily costs
-7. Log all events
-8. Check game-over conditions
-
-### R6 — Event Log
-
-#### R6.1 Comprehensive Logging
-All actions and automated events recorded with:
-- Event type and category
-- Simulated day
-- Detailed JSON payload
-- Categories: production, purchase, demand, inventory, financial, system, alert
-
-#### R6.2 Queryable History
-- Filter by type, date range, category
-- Export for analysis/charts
-
-### R7 — JSON Import/Export
-
-#### R7.1 Full State Export
-Export complete game state including:
-- Current day and wallet balance
-- All inventory levels
-- All orders (manufacturing, demand, purchase)
-- Event history
-- Configuration
-
-#### R7.2 Save/Load Games
-- Save to JSON file
-- Load from previously exported JSON
-- Validation on load to ensure data integrity
-
-### R8 — REST API
-
-#### R8.1 Complete API Coverage
-Every UI feature accessible via REST API:
-- All CRUD operations
-- All simulation triggers
-- All query endpoints
-- Automatic Swagger/OpenAPI documentation at `/docs`
-
-### R9 — Cost/Benefits Simulator
-
-#### R9.1 Wallet Management
-- Starting balance: €10,000 (configurable)
-- Income from fulfilled demand orders
-- Expenses: materials, daily operational costs
-- **Game ends if wallet goes negative**
-
-#### R9.2 Warning System
-- Warning at <€2,000 (configurable threshold)
-- Critical warning at <€500
-- Prevent purchase orders that would cause overdraft
-
-#### R9.3 Daily Operational Costs (R9.4 from user answers)
-Configurable parameters:
-- Fixed daily cost (rent, salaries): €500/day default
-- Variable cost per printer: €50/unit default
-- Energy cost per assembly hour: €10/hour default
-- Maintenance percentage: 5% default
-
-### R10 — Stock Control
-
-#### R10.1 Capacity Enforcement
-- Warehouse capacity limit enforced
-- Purchase orders blocked if insufficient space
-- UI indicator showing capacity utilization
-
-#### R10.2 Volume Calculation
-- Each material unit = 1 volume unit (simplified)
-- Reserved quantities count toward capacity
-- Alert at >80% capacity utilization
-
----
-
-## 5. API Endpoints
-
-### 5.1 Game State & Control
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/api/game/state` | Get current game state (day, wallet, capacities) |
-| POST | `/api/game/advance-day` | Trigger advance day simulation cycle |
-| POST | `/api/game/reset` | Reset game to initial state |
-| GET | `/api/game/stats` | Game statistics (produced, sold, revenue, etc.) |
-
-### 5.2 Products & BOM
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/api/products` | List all products (finished + raw) |
-| POST | `/api/products` | Create new product |
-| GET | `/api/products/{id}` | Get product details |
-| PUT | `/api/products/{id}` | Update product |
-| DELETE | `/api/products/{id}` | Delete product (if no dependents) |
-| GET | `/api/products/{id}/bom` | Get BOM for a product |
-| PUT | `/api/products/{id}/bom` | Update BOM for a product |
-
-### 5.3 Inventory
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/api/inventory` | Get all inventory levels |
-| GET | `/api/inventory/material/{id}` | Get specific material inventory |
-| GET | `/api/inventory/capacity` | Get capacity usage info |
-| POST | `/api/inventory/adjust` | Manual adjustment (admin/debug) |
-
-### 5.4 Demand Orders
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/api/demand-orders` | List all demand orders (filterable) |
-| GET | `/api/demand-orders/open` | Get open demand orders only |
-| GET | `/api/demand-orders/{id}` | Get single demand order details |
-| POST | `/api/demand-orders/{id}/fulfill` | Manually fulfill demand order |
-
-### 5.5 Manufacturing Orders
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/api/manufacturing-orders` | List all manufacturing orders |
-| POST | `/api/manufacturing-orders` | Create new manufacturing order |
-| GET | `/api/manufacturing-orders/{id}` | Get order details with BOM |
-| PUT | `/api/manufacturing-orders/{id}/release` | Release order to production |
-| PUT | `/api/manufacturing-orders/{id}/cancel` | Cancel order |
-| GET | `/api/manufacturing-orders/{id}/requirements` | Calculate material requirements |
-
-### 5.6 Suppliers & Purchasing
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/api/suppliers` | List all suppliers |
-| GET | `/api/suppliers/{id}` | Get supplier details |
-| GET | `/api/suppliers/{id}/catalog` | Get supplier product catalog with current prices |
-| GET | `/api/suppliers/{id}/pricing/{material_id}` | Get pricing for specific material |
-| GET | `/api/purchase-orders` | List all purchase orders |
-| POST | `/api/purchase-orders` | Issue new purchase order |
-| GET | `/api/purchase-orders/{id}` | Get purchase order details |
-| PUT | `/api/purchase-orders/{id}/cancel` | Cancel purchase order |
-
-### 5.7 Clients
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/api/clients` | List all clients |
-| GET | `/api/clients/{id}` | Get client details |
-| GET | `/api/clients/{id}/history` | Get client order history |
-
-### 5.8 Events & Logs
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/api/events` | List events (filterable by type, day, category) |
-| GET | `/api/events/today` | Get today's events |
-| GET | `/api/events/export` | Export events as JSON/CSV |
-
-### 5.9 Configuration
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/api/config` | Get all configuration |
-| GET | `/api/config/{key}` | Get specific config value |
-| PUT | `/api/config/{key}` | Update configuration |
-| GET | `/api/config/daily-costs` | Get daily costs configuration |
-| PUT | `/api/config/daily-costs` | Update daily costs |
-
-### 5.10 Import/Export
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/api/export/full-state` | Export complete game state |
-| POST | `/api/import/full-state` | Import game state from JSON |
-
----
-
-## 6. API Response Examples
-
-### 6.1 Game State
-```json
-{
-    "current_day": 5,
-    "wallet_balance": 8543.50,
-    "warehouse_capacity": 10000,
-    "warehouse_used": 4523,
-    "daily_production_capacity": 10,
-    "production_used_today": 3,
-    "game_over": false,
-    "warning_level": null
-}
-```
-
-### 6.2 Manufacturing Order with BOM
-```json
-{
-    "id": 42,
-    "product_id": 1,
-    "product_name": "Prosumer Printer X1",
-    "quantity": 10,
-    "created_day": 3,
-    "release_day": null,
-    "status": "pending",
-    "remaining_qty": 10,
-    "bom": [
-        {"material_id": 1, "material_name": "ABS Filament Spool", "qty_per_unit": 2, "total_required": 20},
-        {"material_id": 2, "material_name": "Aluminum Extrusion 1m", "qty_per_unit": 4, "total_required": 40},
-        {"material_id": 3, "material_name": "Stepper Motor NEMA17", "qty_per_unit": 3, "total_required": 30}
-    ],
-    "material_availability": {
-        "fully_available": false,
-        "shortages": [{"material_id": 3, "available": 25, "required": 30, "shortage": 5}]
-    }
-}
-```
-
-### 6.3 Supplier Pricing
-```json
-{
-    "supplier_id": 1,
-    "supplier_name": "Industrial Materials Co.",
-    "material_id": 5,
-    "material_name": "PLA Filament",
-    "base_price": 85.00,
-    "daily_fluctuation": 1.05,
-    "current_price_per_unit": 89.25,
-    "packaging_options": [
-        {"type": "unit", "quantity": 1, "price_per_unit": 89.25, "total": 89.25},
-        {"type": "box", "quantity": 20, "price_per_unit": 80.33, "discount": 0.10, "total": 1606.50},
-        {"type": "pallet", "quantity": 1000, "price_per_unit": 71.40, "discount": 0.20, "total": 71400.00}
-    ],
-    "lead_time_days": 3,
-    "stock_status": "in_stock"
-}
-```
-
----
-
-## 7. Frontend Architecture
-
-### 7.1 Layout
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│  HEADER: Day 5 │ Wallet: €8,543.50 │ Capacity: 3/10 used      │
-│                 [Advance Day] [Export] [Import]                 │
-├──────────────────┬──────────────────────────┬──────────────────┤
-│ DEMAND ORDERS    │  PRODUCTION QUEUE        │  INVENTORY       │
-│ ┌──────────────┐ │  ┌────────────────────┐  │  ┌────────────┐ │
-│ │Due: Tomorrow │ │  │ Order #42: 10 units│  │  │ ABS: 245   │ │
-│ │Printer X1 x5 │ │  │ [Release 5] [×]   │  │  │ Aluminum:  │ │
-│ │[View BOM]    │ │  │ Order #43: 3 units │  │  │ 1,230      │ │
-│ └──────────────┘ │  │ [Release 3] [×]   │  │  │ Motors: 87 │ │
-├──────────────────┤  └────────────────────┘  ├──────────────────┤
-│ PURCHASING                               │  DAILY SUMMARY      │
-│ ┌──────────────────────────────────────┐ │  ┌──────────────┐  │
-│ │ Supplier: [Industrial Materials ▼]  │ │  │ Produced: 5  │  │
-│ │ Material: [PLA Filament ▼]          │ │  │ Pending: 13  │  │
-│ │ Qty: [Pallet (1000) @ €71.40]       │ │  │ Revenue: €2k │  │
-│ │ Total: €71,400.00                    │ │  │ Cost: €850   │  │
-│ │ Available Space: 5,477 / 10,000     │ │  │ Net: +€1,150 │  │
-│ │ [Issue Purchase Order]               │ │  └──────────────┘  │
-│ └──────────────────────────────────────┘ │                     │
-├──────────────────────────────────────────┴──────────────────────┤
-│ EVENT LOG (Last 20)                                             │
-│ Day 5 | Demand generated: 3 orders                              │
-│ Day 5 | Purchase PO-042 delivered: 1000 PLA                    │
-│ Day 4 | Order #40 completed: 8 Printers                        │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-### 7.2 Technical Implementation
-- Single-page application using vanilla JavaScript
-- Fetch API for REST calls
-- Modal dialogs for complex actions (purchase order creation)
-- Charts rendered as PNG via matplotlib (embedded as base64)
-- Auto-refresh every 30 seconds (or WebSocket for future enhancement)
-
-### 7.3 Key Pages/Views
-1. **Dashboard** (main view with panels above)
-2. **Orders Detail** (modal with full BOM breakdown)
-3. **Supplier Catalog** (compare prices across suppliers)
-4. **Event Log Browser** (full history with filters)
-5. **Configuration** (admin settings)
-6. **Reports & Analytics** (charts, KPIs)
-
----
-
-## 8. Development Plan
-
-### Phase 1: Foundation (Week 1)
-**Goal:** Working skeleton with basic simulation loop
-
-| Task | ID | Description | Estimate |
-|------|-----|-------------|----------|
-| 1.1 | DB-1 | Design and implement SQLite schema | 4h |
-| 1.2 | BE-1 | Set up FastAPI project structure | 2h |
-| 1.3 | BE-2 | Implement base models with Pydantic | 4h |
-| 1.4 | SIM-1 | Create simulation engine core (day advancement) | 6h |
-| 1.5 | API-1 | Implement game state endpoints | 4h |
-| 1.6 | SEED-1 | Create initial data (products, BOM, suppliers) | 4h |
-
-**Milestone 1:** Can advance days with empty/no-op simulation
-
-### Phase 2: Core Simulation (Week 1-2)
-**Goal:** Complete production and purchasing flow
-
-| Task | ID | Description | Estimate |
-|------|-----|-------------|----------|
-| 2.1 | SIM-2 | Implement demand generation | 4h |
-| 2.2 | SIM-3 | Implement production processing | 6h |
-| 2.3 | SIM-4 | Implement purchase order flow | 6h |
-| 2.4 | SIM-5 | Implement demand fulfillment logic | 4h |
-| 2.5 | SIM-6 | Implement daily cost calculation | 4h |
-| 2.6 | API-2 | Manufacturing orders endpoints | 6h |
-| 2.7 | API-3 | Purchase orders endpoints | 6h |
-| 2.8 | API-4 | Inventory endpoints | 4h |
-
-**Milestone 2:** Full simulation loop working via API
-
-### Phase 3: Business Rules (Week 2)
-**Goal:** Enforce constraints and game rules
-
-| Task | ID | Description | Estimate |
-|------|-----|-------------|----------|
-| 3.1 | BR-1 | Wallet management with overdraft prevention | 4h |
-| 3.2 | BR-2 | Warehouse capacity enforcement | 4h |
-| 3.3 | BR-3 | Production capacity limiting | 3h |
-| 3.4 | BR-4 | Partial order release logic | 4h |
-| 3.5 | BR-5 | Penalty calculation for lost sales | 3h |
-| 3.6 | BR-6 | Game over conditions | 2h |
-
-**Milestone 3:** All business rules enforced correctly
-
-### Phase 4: Event System (Week 2)
-**Goal:** Comprehensive logging and history
-
-| Task | ID | Description | Estimate |
-|------|-----|-------------|----------|
-| 4.1 | EVT-1 | Event logging infrastructure | 4h |
-| 4.2 | EVT-2 | Log all simulation events | 6h |
-| 4.3 | API-5 | Events query endpoints | 4h |
-| 4.4 | IMP-EXP-1 | JSON export functionality | 4h |
-| 4.5 | IMP-EXP-2 | JSON import functionality | 4h |
-
-**Milestone 4:** Complete audit trail and save/load
-
-### Phase 5: Frontend (Week 3)
-**Goal:** Usable web interface
-
-| Task | ID | Description | Estimate |
-|------|-----|-------------|----------|
-| 5.1 | FE-1 | Basic HTML layout with CSS | 6h |
-| 5.2 | FE-2 | Dashboard panel components | 8h |
-| 5.3 | FE-3 | Order management interface | 6h |
-| 5.4 | FE-4 | Purchasing interface | 6h |
-| 5.5 | FE-5 | Chart integration (matplotlib→PNG) | 4h |
-| 5.6 | FE-6 | Modal dialogs for actions | 4h |
-| 5.7 | FE-7 | Responsive design tweaks | 4h |
-
-**Milestone 5:** Fully functional UI
-
-### Phase 6: Polish & Documentation (Week 3)
-**Goal:** Professional finish
-
-| Task | ID | Description | Estimate |
-|------|-----|-------------|----------|
-| 6.1 | DOC-1 | Complete OpenAPI documentation | 4h |
-| 6.2 | DOC-2 | README and setup instructions | 4h |
-| 6.3 | DOC-3 | Code comments and docstrings | 6h |
-| 6.4 | TEST-1 | Unit tests for simulation logic | 8h |
-| 6.5 | TEST-2 | API endpoint tests | 6h |
-| 6.6 | FIX-1 | Bug fixes and edge cases | 8h |
-| 6.7 | PERF-1 | Performance optimization | 4h |
-
-**Final Milestone:** Production-ready system
-
----
-
-## 9. Timeline Summary
-
-| Phase | Duration | Deliverables |
-|-------|----------|--------------|
-| **Phase 1** | 3 days | Skeleton architecture, database, simulation core |
-| **Phase 2** | 4 days | Complete simulation logic, all API endpoints |
-| **Phase 3** | 2 days | Business rule enforcement |
-| **Phase 4** | 2 days | Event logging, import/export |
-| **Phase 5** | 4 days | Full frontend implementation |
-| **Phase 6** | 4 days | Testing, documentation, polish |
-| **Total** | **~19 working days** | ~3 weeks full-time |
-
-### Buffer & Contingency (+20%)
-- Unexpected complexity: +4 days
-- Integration issues: +2 days
-- **Adjusted estimate: ~25 working days (~5 weeks part-time)**
-
----
-
-## 10. Risk Assessment
-
-| Risk | Impact | Mitigation |
-|------|--------|------------|
-| SimPy vs custom engine decision | Medium | Start with custom; can refactor if needed |
-| Frontend complexity underestimated | High | Use simple patterns, avoid premature polish |
-| SQLite performance at scale | Low-Medium | Expected data volume is small; add indexing |
-| Price fluctuation logic too complex | Low | Start with simple ±10% uniform distribution |
-| Partial order release edge cases | Medium | Thorough testing of boundary conditions |
-
----
-
-## 11. Acceptance Criteria
-
-### Minimum Viable Product (MVP)
-- [ ] Can advance days and see simulation progress
-- [ ] Demand orders are generated and trackable
-- [ ] Can create and release manufacturing orders
-- [ ] Materials are consumed according to BOM
-- [ ] Can issue purchase orders through suppliers
-- [ ] Wallet balance updates correctly
-- [ ] Game enforces non-negative wallet constraint
-- [ ] Game enforces warehouse capacity constraint
-- [ ] All events are logged
-- [ ] Can export/import game state as JSON
-- [ ] All features accessible via REST API
-- [ ] Swagger docs auto-generated and accurate
-
-### Stretch Goals
-- [ ] Email/dashboard notifications for low wallet
-- [ ] Advanced analytics dashboard
-- [ ] Multiple supplier comparison view
-- [ ] Scenario planning mode
-- [ ] Achievement/trophy system
-- [ ] Multi-currency support
-
----
-
-## 13. Week 7 — Retail Supply Chain & Agent Orchestration
-
-### 13.1 Overview
-
-Week 7 extends the two-app system (Provider + Manufacturer) into a full three-tier retail supply chain. A new Retailer application sits between end customers and the Manufacturer, placing production orders and selling finished printers to the public. An external Turn Engine orchestrates simulated days across all three apps in sequence. AI agent skills replace manual decision-making for each role.
-
-### 13.2 Three-App Architecture
-
-```
-Provider :8001  (supplier.db)
-    │  raw material orders
-    ▼
-Manufacturer :8002  (simulator.db)
-    │  finished printer orders (SalesOrders)
-    ▼
-Retailer :8003  (retailer.db)
-    │  retail sales
-    ▼
-End Customers
-```
-
-Each app has its own SQLite database and communicates with adjacent apps exclusively via REST. No shared database connections exist across app boundaries.
+### 2.2 Port and Database Assignment
 
 | App | Port | Database | Role |
 |-----|------|----------|------|
 | Provider | 8001 | supplier.db | Raw material supplier |
 | Manufacturer | 8002 | simulator.db | Factory production |
-| Retailer | 8003 | retailer.db | Retail sales |
+| Retailer | 8003 | retailer.db | End-customer retail |
 
-### 13.3 Retailer Application (Port 8003)
+### 2.3 File Structure
 
-#### 13.3.1 Catalog Management
+```
+app/                          # Manufacturer API (port 8002)
+  main.py                     # FastAPI app; serves React build + /api/* routes
+  db/
+    database.py               # Engine, SessionLocal, Base, get_db, init_db
+    models.py                 # All ORM models including ManufacturerMetrics
+  schemas/                    # Pydantic v2 request/response schemas
+  services/
+    simulation.py             # advance_day(), demand gen, production, costs, game-over
+    production.py             # create_mo(), release_mo(), cancel_mo()
+    purchasing.py             # issue_purchase_order(), supplier catalog helpers
+    inventory.py              # reserve/consume/unreserve materials
+    supplier_client.py        # HTTP client for Provider API (httpx, sync)
+    seed.py                   # seed_initial_data(), reset_game()
+  api/
+    game.py                   # /api/game/* endpoints
+    manufacturing.py          # /api/manufacturing-orders/* endpoints
+    purchasing.py             # /api/suppliers/*, /api/purchase-orders endpoints
+    sales.py                  # /api/sales-orders/* endpoints
+    agent.py                  # /api/agent/context
+    dashboard.py              # /api/dashboard/state + /api/dashboard/run-turn
 
-The retailer sells two printer models sourced from the Manufacturer:
+supplier_api/                 # Provider API (port 8001)
+  main.py
+  database.py
+  models.py                   # Supplier, SupplierProduct, PricingTier, Stock,
+                              #   PurchaseOrder, SimState, SupplierEvent, ProviderMetrics
+  routes.py                   # All inter-service + CLI/agent endpoints
+  seed.py
 
-| SKU | Name | Description |
-|-----|------|-------------|
-| P3D-Classic | P3D-Classic | Entry-level 3D printer |
-| P3D-Pro | P3D-Pro | Professional 3D printer |
+retailer/                     # Retailer API (port 8003)
+  main.py
+  database.py
+  models.py                   # Catalog, CustomerOrder, RetailerPurchaseOrder,
+                              #   RetailerStock, RetailerGameState, RetailerEvent,
+                              #   RetailerMetrics
+  seed.py
+  schemas.py
+  config.py
+  api/
+    catalog.py
+    orders.py
+    purchases.py
+    game.py
+    agent.py                  # /api/agent/context
 
-Catalog entries store the retail sell price, the manufacturer product ID used when placing purchase orders, and current stock levels.
+turn_engine/                  # Turn Engine package
+  engine.py                   # Main loop + generate_customer_orders()
+  config.py                   # load_scenario(), todays_signal(), compound event logic
+  demand.py                   # Stochastic demand injection
 
-#### 13.3.2 Customer Order Handling
+frontend/
+  src/
+    components/
+      GameHeader.jsx
+      GameTabs.jsx
+      Toast.jsx
+      Tabs/
+        GameTab.jsx
+        OrdersTab.jsx
+        InventoryTab.jsx
+        SuppliersTab.jsx
+        EventsTab.jsx
+        SimDashboard.jsx      # Three-app dashboard with autopilot
+    utils/
+      api.js
+      formatting.js
+  dist/                       # Production build (served by Manufacturer API)
 
-- Customer orders arrive as inbound requests specifying SKU and quantity.
-- On receipt, the retailer attempts immediate fulfillment from available stock.
-- If sufficient stock exists: order status set to `fulfilled`, stock decremented.
-- If stock is insufficient: order status set to `backordered`, and a purchase order is automatically raised to the Manufacturer for the shortfall.
-- Backorders are fulfilled automatically during day advancement when the corresponding Manufacturer delivery arrives.
+tests/
+  conftest.py
+  test_inventory.py           # 12 tests
+  test_production.py          # 14 tests
+  test_purchasing.py          # 12 tests
+  test_simulation.py          # 17 tests
+  test_api.py                 # 43 tests
+  test_retailer.py            # 14 tests
 
-#### 13.3.3 Purchase Orders to Manufacturer
+scenarios/
+  smoke-test.json
+  calm-market.json
+  holiday-rush.json
 
-- Retailer places purchase orders against the Manufacturer's sales order API (`POST /api/sales-orders`).
-- Purchase order tracks: SKU, quantity, order day, expected delivery day, status (`pending` / `shipped` / `delivered`).
-- Payment is deducted from the retailer wallet on order placement.
-- Delivered stock is added to retailer inventory during the day-advance cycle.
+skills/
+  manufacturer-manager.md
+  provider-manager.md
+  retail-manager.md
 
-#### 13.3.4 Stock Tracking
+config/
+  sim.json
 
-- Per-SKU stock levels tracked in `retailer.db`.
-- Stock is decremented on customer fulfillment and incremented on Manufacturer delivery.
-- Low-stock threshold configurable; alerts logged as events.
+analysis.py                   # Post-run matplotlib chart generation
+turn_engine.py                # Turn Engine entry point
+manufacturer_cli.py
+provider_cli.py
+retailer_cli.py
+manufacturer_config.json      # Provider URL (read by supplier_client.py)
+retailer_config.json          # Manufacturer URL (read by retailer purchase client)
+seed-provider.json
+start.sh / stop.sh
+```
 
-#### 13.3.5 Wallet Management
+---
 
-- Starting wallet: €50,000 (configurable on reset).
-- Income: customer order payments on fulfillment.
-- Expenses: purchase orders to Manufacturer, daily fixed operating costs.
-- Wallet check enforced before placing purchase orders (no overdraft).
+## 3. Tech Stack
 
-#### 13.3.6 Day Advancement
+| Layer | Technology | Notes |
+|-------|------------|-------|
+| Language | Python 3.12 | All three backend apps |
+| Backend Framework | FastAPI + Pydantic v2 | REST API, automatic OpenAPI docs |
+| Database | SQLite (three separate files) | ACID compliance, easy backup |
+| ORM | SQLAlchemy | Declarative models |
+| HTTP client | httpx (sync) | Cross-service calls |
+| Frontend | React 19 + Vite 5 + TailwindCSS v3 | Built SPA served as static files by Manufacturer API |
+| Frontend icons | lucide-react | Icon set used in SimDashboard |
+| Charts (post-run) | matplotlib + numpy | `analysis.py` offline charts |
+| Simulation | Custom discrete-event loop | Turn-based day progression |
+| AI agents | `claude --print` CLI | One agent per role per turn |
+| Tests | pytest + httpx | 112 tests, StaticPool in-memory SQLite |
 
-On `POST /api/day/advance`:
-1. Process incoming Manufacturer deliveries → increment stock, fulfill backorders.
-2. Apply daily fixed operating costs.
-3. Log all events.
-4. Increment current day.
+### 3.1 Why Custom Simulation Over SimPy?
 
-#### 13.3.7 Retailer API Endpoints
+Turn-based "Advance Day" mechanics map more naturally to a custom event loop:
+- Day boundaries are explicit game checkpoints, not observation points
+- User/agent decisions happen at specific points between phases
+- Simpler to audit, test, and explain
+
+---
+
+## 4. Data Model
+
+### 4.1 Manufacturer Database (simulator.db)
+
+| Table | Purpose |
+|-------|---------|
+| `game_state` | Singleton: current_day, wallet_balance, capacities, game_over |
+| `daily_costs` | Fixed cost, variable cost/unit, energy cost/hour, maintenance % |
+| `config` | Key-value runtime config |
+| `clients` | Demand sources (id=1 "Default Client") |
+| `products` | Finished printers (type=finished) |
+| `raw_materials` | Purchasable inputs with base_price, volume_per_unit |
+| `bom` | Bill of Materials: product × material × qty_needed |
+| `inventory` | quantity + reserved_quantity per material |
+| `manufacturing_orders` | Status: pending → released → completed / cancelled |
+| `demand_orders` | Status: open → partial / fulfilled / lost |
+| `sales_orders` | B2B orders from Retailer (status: pending → fulfilled / cancelled) |
+| `purchase_orders` | Local mirror of POs placed (status: pending / delivered) |
+| `events` | Append-only audit log (event_type, sim_day, category, details JSON) |
+| `manufacturer_metrics` | Daily snapshots: parts stock, finished stock, utilisation, prices, wallet |
+
+#### Key ORM Models
+
+```python
+# GameState — singleton row (id=1)
+current_day: int
+wallet_balance: float          # starts €10,000
+warehouse_capacity: int        # default 10,000 units
+daily_production_capacity: int # default 10 units/day
+days_with_negative_balance: int
+game_over: bool
+
+# ManufacturingOrder
+status: "pending" | "released" | "completed" | "cancelled"
+remaining_qty: int             # tracks partial completion
+
+# DemandOrder
+due_day: int                   # request_day + 3–7 days
+status: "open" | "partial" | "fulfilled" | "lost"
+penalty_amount: float          # €50/unit if lost
+
+# SalesOrder  (B2B from Retailer)
+status: "pending" | "fulfilled" | "cancelled"
+
+# ManufacturerMetrics
+sim_day: int
+parts_stock_json: str          # JSON: {material_name: qty}
+finished_stock_json: str       # JSON: {product_name: qty}
+production_utilisation: float  # 0.0–1.0
+wallet_balance: float
+```
+
+### 4.2 Provider Database (supplier.db)
+
+| Table | Purpose |
+|-------|---------|
+| `suppliers` | name, lead_time_days, reliability |
+| `supplier_products` | supplier × material_id × base_unit_cost × daily_price_factor |
+| `pricing_tiers` | 4 tiers per supplier_product (1/10/50/100 units: 0%/10%/18%/25% discount) |
+| `stock` | Current units held per supplier_product (replenishes +15/day, max 500) |
+| `purchase_orders` | All POs; status: pending → shipped → delivered → received (+ delayed) |
+| `sim_state` | Key-value store for supplier current_day |
+| `supplier_events` | Audit log |
+| `provider_metrics` | Daily snapshots: stock per product, prices, order counts |
+
+Stochastic delivery: when an order is due, `random() < reliability` determines on-time delivery. Failure extends `expected_delivery_day` by 1–3 days and sets status to `delayed`.
+
+### 4.3 Retailer Database (retailer.db)
+
+| Table | Purpose |
+|-------|---------|
+| `catalog` | Products the retailer sells (linked to manufacturer product_id, retail_price) |
+| `customer_orders` | End-customer orders (status: open → fulfilled / lost) |
+| `retailer_purchase_orders` | B2B POs sent to Manufacturer (status: pending → delivered) |
+| `retailer_stock` | On-hand finished printer inventory per catalog item |
+| `retailer_game_state` | Singleton: current_day, wallet_balance, game_over |
+| `retailer_events` | Append-only audit log |
+| `retailer_metrics` | Daily snapshots: stock per model, prices, orders placed/fulfilled/backordered |
+
+---
+
+## 5. Simulation Day Cycle
+
+Each `advance_day()` call on the Manufacturer executes the following phases in order:
+
+```
+1. supplier_client.fluctuate_prices()          → Provider: POST /prices/fluctuate
+2. supplier_client.advance_supplier_day()      → Provider: POST /api/day/advance
+     → pending orders → shipped
+     → shipped/delayed orders due today: reliability roll
+        success → delivered; failure → delayed (+1–3 days)
+     → stock replenished (+15/day, max 500)
+     → provider current_day += 1
+3. generate_demand_orders(db, day)             → 1–2 random DemandOrders
+4. process_purchase_deliveries(db, day)
+     → GET /orders/due?day=N (status=delivered)
+     → update local Inventory.quantity
+     → update LocalPurchaseOrder.status = "delivered"
+     → PUT /orders/{id}/deliver (→ received)
+5. process_production(db, day)
+     → for each released MO (up to daily_production_capacity):
+        check BOM availability → consume materials → mark completed
+6. mark_expired_demands(db, day)
+     → status="lost", penalty=€50×unfulfilled, deduct from wallet
+7. calculate_daily_costs(db, day)
+     → deduct fixed_cost + production costs (variable + energy + maintenance)
+8. check_game_over(db, day)
+     → wallet < 0: days_with_negative_balance++
+     → >= 3 consecutive: game_over = True
+9. current_day += 1; db.commit()
+```
+
+Retailer day advancement (called separately by Turn Engine or Dashboard):
+
+```
+POST /api/day/advance (Retailer)
+  → process incoming Manufacturer deliveries → increment stock, fulfill backorders
+  → apply daily operating costs
+  → log events; increment current_day
+```
+
+---
+
+## 6. API Endpoints
+
+### 6.1 Manufacturer API (port 8002)
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/api/state` | Retailer game state (day, wallet, stock) |
-| GET | `/api/catalog` | List all SKUs with stock and pricing |
-| POST | `/api/orders` | Place a customer order |
-| GET | `/api/orders` | List customer orders (optional `?status=`) |
-| GET | `/api/orders/{id}` | Customer order detail |
-| POST | `/api/purchase-orders` | Place purchase order to Manufacturer |
-| GET | `/api/purchase-orders` | List all purchase orders |
-| POST | `/api/day/advance` | Advance retailer day |
-| GET | `/api/export` | Export retailer state as JSON |
-| POST | `/api/import` | Restore retailer state from JSON |
-| POST | `/api/reset` | Reset retailer to day 1 |
-| GET | `/api/agent/context` | Full state snapshot for AI agents |
+| GET | /api/game/state | Game state (day, wallet, capacities) |
+| GET | /api/game/inventory | Inventory levels per material |
+| GET | /api/game/products | Active finished products |
+| GET | /api/game/demand-orders | Demand orders (optional ?status=) |
+| GET | /api/game/finished-goods | Available finished goods per product |
+| GET | /api/game/events | Event log (optional ?category=) |
+| POST | /api/game/advance-day | Advance simulation by one day |
+| POST | /api/game/demand-orders/{id}/fulfill | Manually serve a demand order |
+| GET | /api/game/export | Download full game snapshot as JSON |
+| POST | /api/game/import | Restore game from JSON snapshot |
+| POST | /api/game/reset | Reset to day 1 (optional config body) |
+| GET | /api/manufacturing-orders | List all MOs |
+| POST | /api/manufacturing-orders | Create new MO |
+| GET | /api/manufacturing-orders/{id} | Get MO with BOM detail |
+| PUT | /api/manufacturing-orders/{id}/release | Release MO to production |
+| PUT | /api/manufacturing-orders/{id}/cancel | Cancel MO (unreserves materials) |
+| GET | /api/suppliers | List suppliers (via Provider API) |
+| GET | /api/suppliers/{id}/catalog | Catalog with current prices |
+| GET | /api/suppliers/{id}/pricing/{mat_id} | Single material pricing |
+| GET | /api/purchase-orders | List all POs |
+| POST | /api/purchase-orders | Issue new PO (wallet + capacity check) |
+| GET | /api/sales-orders | List all sales orders from Retailer |
+| POST | /api/sales-orders | Create new sales order (from Retailer) |
+| PUT | /api/sales-orders/{id}/fulfill | Fulfill a sales order |
+| GET | /api/agent/context | Full game state snapshot for AI agents |
+| GET | /api/dashboard/state | Combined 3-app state snapshot |
+| POST | /api/dashboard/run-turn | Run one autopilot turn (inject demand + advance all apps) |
 
-### 13.4 Sales Orders (Manufacturer)
+### 6.2 Provider API (port 8001)
 
-Sales orders replace the stochastic demand order system for inter-app flow. Instead of random demand generation, the Manufacturer receives explicit orders from the Retailer via the sales order API.
-
-#### 13.4.1 SalesOrder Model
-
-```
-SalesOrder
-  id              INTEGER PK
-  retailer_id     INTEGER           -- identifies the requesting retailer
-  product_id      INTEGER FK → products
-  quantity        INTEGER
-  created_day     INTEGER
-  due_day         INTEGER
-  status          TEXT              -- pending | released | completed | shipped | delivered
-  fulfilled_qty   INTEGER DEFAULT 0
-  unit_price      REAL              -- agreed price at order time
-  total_value     REAL
-```
-
-#### 13.4.2 Status Lifecycle
-
-```
-pending
-   │  (MO created and released)
-   ▼
-released
-   │  (production completes in advance_day)
-   ▼
-completed
-   │  (Manufacturer ships to Retailer)
-   ▼
-shipped
-   │  (Retailer advances day and receives delivery)
-   ▼
-delivered
-```
-
-- Materials are reserved against inventory when the sales order transitions to `released`.
-- Production is processed as part of the normal `advance_day` cycle alongside internal manufacturing orders.
-- On completion, the Manufacturer marks the order `shipped` and notifies the Retailer (or the Turn Engine triggers the Retailer advance which polls for shipped orders).
-
-#### 13.4.3 Manufacturer Sales Order API Endpoints
+**Inter-service endpoints (called by Manufacturer):**
 
 | Method | Path | Description |
 |--------|------|-------------|
-| POST | `/api/sales-orders` | Create a new sales order from Retailer |
-| GET | `/api/sales-orders` | List all sales orders (optional `?status=`) |
-| GET | `/api/sales-orders/{id}` | Sales order detail |
-| PUT | `/api/sales-orders/{id}/release` | Release to production (reserve materials) |
-| PUT | `/api/sales-orders/{id}/ship` | Mark order as shipped |
-| GET | `/api/sales-orders/due?day=N` | Orders completed and ready to ship |
+| GET | /health | Health check |
+| GET | /suppliers | List all suppliers |
+| GET | /suppliers/{id}/catalog | Catalog with current prices + tiers + stock |
+| GET | /suppliers/{id}/pricing/{mat_id}?quantity=N | Tier-adjusted pricing |
+| POST | /orders | Create purchase order (deducts stock) |
+| GET | /orders/due?day=N | Delivered orders awaiting factory acknowledgement |
+| PUT | /orders/{id}/deliver | Mark order as received by factory |
+| POST | /prices/fluctuate | Apply ±10% price fluctuation |
+| POST | /api/day/advance | Advance supplier day |
+| DELETE | /orders | Delete all orders (reset/import) |
 
-### 13.5 Turn Engine Orchestration
+**CLI/agent endpoints:**
 
-The Turn Engine is an external Python script that drives one simulated calendar day across all three apps in a deterministic sequence. It decouples orchestration from application business logic.
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | /api/catalog | All products with pricing tiers and stock |
+| GET | /api/stock | Current stock levels |
+| POST | /api/orders | Place order (stock check + tier pricing) |
+| GET | /api/orders | List orders (optional ?status=) |
+| GET | /api/orders/{id} | Order detail |
+| POST | /api/stock/{sp_id}/restock | Add to supplier stock |
+| PUT | /api/pricing/tiers/{tier_id} | Update a pricing tier |
+| GET | /api/day/current | Current supplier day |
+| GET | /api/export | Export supplier state |
+| POST | /api/import | Restore supplier state |
 
-#### 13.5.1 Invocation
+### 6.3 Retailer API (port 8003)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | /api/game/state | Retailer game state (day, wallet, game_over) |
+| POST | /api/game/advance-day | Advance retailer simulation by one day |
+| GET | /api/game/export | Export retailer snapshot |
+| POST | /api/game/import | Restore retailer from JSON snapshot |
+| POST | /api/game/reset | Reset retailer to day 1 |
+| GET | /api/catalog | List retailer product catalog |
+| GET | /api/orders | List customer orders (optional ?status=) |
+| POST | /api/orders | Create new customer order |
+| PUT | /api/orders/{id}/fulfill | Fulfill a customer order from stock |
+| GET | /api/purchases | List B2B purchase orders sent to manufacturer |
+| POST | /api/purchases | Issue new B2B purchase order to manufacturer |
+| GET | /api/agent/context | Full retailer state snapshot for AI agents |
+| GET | /api/metrics | Time-series metrics rows (queried by Dashboard) |
+
+---
+
+## 7. Turn Engine Design
+
+### 7.1 Overview
+
+`turn_engine/` is a Python package orchestrated by `turn_engine.py`. It advances all three apps in dependency order (Provider → Manufacturer → Retailer) on each simulated day and injects stochastic customer demand into the Retailer before apps advance.
+
+### 7.2 CLI Invocation
 
 ```bash
-python turn_engine.py config/sim.json scenarios/smoke-test.json 3
+python turn_engine.py config/sim.json scenarios/holiday-rush.json 25
 ```
 
-Arguments:
-- `config/sim.json` — base configuration (app URLs, timeouts, log directory)
-- `scenarios/smoke-test.json` — scenario definition (initial state, agent skill overrides, number of days)
-- `3` — number of days to simulate in this run
+Arguments: config file path, scenario file path, number of days to simulate.
 
-#### 13.5.2 Day Cycle Sequence
-
-For each simulated day the Turn Engine executes the following steps in order:
+### 7.3 Per-Day Execution Sequence
 
 ```
-1. inject_demand(retailer)
-      POST /api/orders  — inject customer orders per scenario demand profile
-
-2. retailer_decisions(retailer)
-      invoke agent skill: skills/retailer-manager.md
-      agent reads GET /api/agent/context, decides purchase orders to Manufacturer
-
-3. manufacturer_decisions(manufacturer)
-      invoke agent skill: skills/manufacturer-manager.md
-      agent reads GET /api/agent/context, decides MOs to release, POs to Provider
-
-4. provider_decisions(provider)
-      invoke agent skill: skills/provider-manager.md
-      agent reads GET /api/catalog and /api/stock, adjusts pricing tiers or restock
-
-5. advance_provider(provider)
-      POST /api/day/advance  — ships pending orders, replenishes stock, increments day
-
-6. advance_manufacturer(manufacturer)
-      POST /api/game/advance-day  — fluctuates prices, processes deliveries, runs
-                                     production, deducts costs, increments day
-
-7. advance_retailer(retailer)
-      POST /api/day/advance  — processes Manufacturer deliveries, fulfills
-                                backorders, deducts costs, increments day
-
-8. log_day_summary()
-      write logs/day-NNN-summary.json with wallet balances and key metrics
+For each simulated day:
+  1. inject_demand(retailer)         POST /api/orders — customer orders per scenario profile
+  2. retailer_decisions(retailer)    invoke skills/retail-manager.md agent
+  3. manufacturer_decisions(mfg)     invoke skills/manufacturer-manager.md agent
+  4. provider_decisions(provider)    invoke skills/provider-manager.md agent
+  5. advance_provider(provider)      POST /api/day/advance
+  6. advance_manufacturer(mfg)       POST /api/game/advance-day
+     (this also internally advances provider via supplier_client)
+  7. advance_retailer(retailer)      POST /api/game/advance-day
+  8. log_day_summary()               write day-NNN-summary.json to logs/
 ```
 
-#### 13.5.3 Configuration Files
+### 7.4 Configuration Files
 
 `config/sim.json`:
 ```json
 {
-    "apps": {
-        "provider":     { "url": "http://localhost:8001" },
-        "manufacturer": { "url": "http://localhost:8002" },
-        "retailer":     { "url": "http://localhost:8003" }
-    },
-    "agent_timeout_seconds": 180,
-    "log_dir": "logs"
+  "apps": {
+    "provider":     { "url": "http://localhost:8001" },
+    "manufacturer": { "url": "http://localhost:8002" },
+    "retailer":     { "url": "http://localhost:8003" }
+  },
+  "agent_skills": {
+    "provider":     "skills/provider-manager.md",
+    "manufacturer": "skills/manufacturer-manager.md",
+    "retailer":     "skills/retail-manager.md"
+  },
+  "agent_timeout_seconds": 180,
+  "log_dir": "logs"
 }
 ```
 
-`scenarios/smoke-test.json`:
-```json
-{
-    "name": "smoke-test",
-    "days": 3,
-    "daily_demand": [
-        { "sku": "P3D-Classic", "quantity": 2 },
-        { "sku": "P3D-Pro",     "quantity": 1 }
-    ],
-    "agent_skills": {
-        "retailer":     "skills/retailer-manager.md",
-        "manufacturer": "skills/manufacturer-manager.md",
-        "provider":     null
-    }
-}
-```
+### 7.5 Day Summary Log
 
-### 13.6 Agent Skill System
+Each day produces files in `logs/`:
+- `day-NNN-retailer.log` — raw agent output for retailer decisions
+- `day-NNN-manufacturer.log` — raw agent output for manufacturer decisions
+- `day-NNN-provider.log` — raw agent output for provider decisions
+- `day-NNN-summary.json` — structured metrics snapshot (wallets, orders, key indicators)
 
-Each app role is driven by a Claude agent invoked via `claude --print`. Skill files are markdown documents that describe the decision framework for that role.
+---
 
-#### 13.6.1 Skill Invocation
+## 8. Agent Design
 
-The Turn Engine invokes an agent skill as:
+### 8.1 Overview
+
+All three roles are driven by Claude agents invoked via `claude --print`. Agent decision logic is encoded in Markdown skill files under `skills/`. The Turn Engine loads the relevant skill and injects it as system context when invoking the agent, keeping logic version-controlled and separate from the engine.
+
+### 8.2 Agent Invocation Pattern
 
 ```bash
 claude --print "$(cat skills/manufacturer-manager.md)\n\n## Current Context\n$(curl -s http://localhost:8002/api/agent/context)"
 ```
 
 - Timeout: 180 seconds per invocation.
-- stdout is captured to `logs/day-NNN-<role>.log`.
-- The agent is expected to emit a sequence of `curl` or structured API call commands that the Turn Engine parses and executes, or the agent calls the APIs directly using tool use if running in an agentic context.
+- stdout captured to `logs/day-NNN-<role>.log`.
+- The agent emits API calls that the Turn Engine executes, or calls APIs directly using tool use in an agentic context.
 
-#### 13.6.2 Skill Files
+### 8.3 Skill Files
 
-| File | Role | Responsibility |
-|------|------|---------------|
-| `skills/manufacturer-manager.md` | Manufacturer agent | Decide which MOs to release, which raw materials to purchase, based on open sales orders, inventory levels, wallet balance, and supplier pricing |
-| `skills/retailer-manager.md` | Retailer agent | Decide how many units of each SKU to order from the Manufacturer based on current stock, pending customer backorders, and wallet balance |
-| `skills/provider-manager.md` | Provider agent | Optionally adjust pricing tiers or trigger restocks; normally a no-op unless scenario overrides |
+| File | Role | Core Responsibility |
+|------|------|---------------------|
+| `skills/manufacturer-manager.md` | Manufacturer agent | Release MOs for open sales orders and demand orders; purchase raw materials when stock is low; prioritise orders by due date; maintain ≥€1,000 wallet buffer |
+| `skills/provider-manager.md` | Provider agent | Monitor stock levels; trigger restocks before stockouts; adjust pricing tiers in response to demand signals from the scenario |
+| `skills/retail-manager.md` | Retailer agent | Fulfill pending customer orders from stock; purchase printers from Manufacturer when stock falls below threshold; manage wallet |
 
-#### 13.6.3 manufacturer-manager.md Decision Framework
+### 8.4 Agent Context Endpoints
 
-The manufacturer agent follows this logic on each turn:
+Each app exposes `GET /api/agent/context` returning a single JSON object with complete operational state:
 
-1. Read `/api/agent/context` — open sales orders, inventory, wallet, BOM, supplier pricing.
-2. For each open sales order: check if materials are available; if yes, release an MO.
-3. For any material shortage: compute quantity needed across all pending sales orders; issue purchase orders using the best-priced supplier tier that fits within wallet constraints.
-4. Prioritise orders with the nearest due day.
-5. Do not over-commit wallet: leave a buffer of at least €1,000.
-
-#### 13.6.4 Log Artifacts
-
-Each day produces:
-- `logs/day-NNN-retailer.log` — raw agent output for retailer decisions
-- `logs/day-NNN-manufacturer.log` — raw agent output for manufacturer decisions
-- `logs/day-NNN-provider.log` — raw agent output for provider decisions (if skill active)
-- `logs/day-NNN-summary.json` — structured metrics snapshot
-
-### 13.7 Week 7 Acceptance Criteria
-
-- [ ] Retailer app starts on port 8003 with €50,000 starting wallet and P3D-Classic / P3D-Pro catalog
-- [ ] Customer orders auto-fulfill from stock or backorder correctly
-- [ ] Retailer purchase orders reach Manufacturer and create SalesOrders
-- [ ] SalesOrder lifecycle transitions correctly: pending → released → completed → shipped → delivered
-- [ ] Materials are reserved on SalesOrder release and consumed on production completion
-- [ ] Turn Engine runs a 3-day smoke-test scenario end-to-end without errors
-- [ ] All three apps advance in lockstep (same simulated day after each Turn Engine cycle)
-- [ ] Agent skills produce valid API calls within the 180s timeout
-- [ ] Day logs written to `logs/` for each simulated day
-- [ ] All existing 98 tests continue to pass after Manufacturer changes
+- **Manufacturer**: wallet, inventory with available qty, products + BOM + max producible, open demands with days remaining and revenue, active MOs, pending POs, supplier catalog with per-tier effective prices and affordability flags
+- **Retailer**: game state, catalog with stock/prices, open orders, stats (fulfilled/backordered last 5 days), pending purchase orders to Manufacturer
+- **Provider**: accessible via `/api/catalog` + `/api/stock` + `/api/orders`
 
 ---
 
-## 12. Appendix
+## 9. Scenario System
 
-### A. Example Initial Data
+### 9.1 Overview
 
-#### Products
-| id | name | type | sell_price | assembly_time |
-|----|------|------|------------|---------------|
-| 1 | Hobby Printer Mini | finished | 350.00 | 2.0 |
-| 2 | Prosumer Printer X1 | finished | 850.00 | 4.0 |
-| 3 | Industrial Printer Pro | finished | 2500.00 | 8.0 |
+Scenarios are JSON files in `scenarios/`. Each scenario defines a name, total days, per-day demand quantities, and a list of timed market events. The Turn Engine reads the scenario each tick and computes the active signal for the current day.
+
+### 9.2 Scenario File Format
+
+```json
+{
+  "scenario_name": "holiday-rush",
+  "days": 25,
+  "daily_demand": [
+    { "sku": "P3D-Classic", "quantity": 3 },
+    { "sku": "P3D-Pro",     "quantity": 2 }
+  ],
+  "events": [
+    {
+      "name": "Black Friday",
+      "description": "Consumer demand spike",
+      "start_day": 5,
+      "end_day": 8,
+      "demand_modifier": 2.5,
+      "supply_modifier": 1.0,
+      "price_sensitivity": "high"
+    },
+    {
+      "name": "Chip Shortage",
+      "description": "Component supply disruption",
+      "start_day": 6,
+      "end_day": 20,
+      "supply_modifier": 0.3,
+      "lead_time_modifier": 2.0
+    }
+  ]
+}
+```
+
+### 9.3 Compound Event Logic
+
+When multiple events are active simultaneously, numeric modifiers (`demand_modifier`, `supply_modifier`, `lead_time_modifier`) are **multiplied** together. String hints (`price_sensitivity`) use last-writer-wins. This allows realistic compound stress:
+
+| Scenario | Days 6–8 (Black Friday + Chip Shortage) |
+|----------|----------------------------------------|
+| demand_modifier | 2.5 × 1.0 = 2.5 |
+| supply_modifier | 1.0 × 0.3 = 0.3 |
+| lead_time_modifier | 1.0 × 2.0 = 2.0 |
+
+### 9.4 Bundled Scenarios
+
+| File | Purpose | Days | Key Events |
+|------|---------|------|------------|
+| `scenarios/smoke-test.json` | Minimal CI integration test | 3 | None |
+| `scenarios/calm-market.json` | Stable baseline (control group) | 25 | None |
+| `scenarios/holiday-rush.json` | Volatile stress test | 25 | Black Friday (days 5–8), Chip Shortage (days 6–20), Christmas (days 18–25) |
+
+---
+
+## 10. Metrics and Analysis
+
+### 10.1 Per-App Metrics Tables
+
+Each app snapshots key indicators into its own metrics table on every `advance-day` call. These provide time-series data for post-run analysis.
+
+#### ManufacturerMetrics (simulator.db)
+
+| Column | Type | Description |
+|--------|------|-------------|
+| id | INTEGER PK | Auto-increment |
+| sim_day | INTEGER | Simulation day |
+| parts_stock_json | TEXT | JSON: {material_name: available_qty} |
+| finished_stock_json | TEXT | JSON: {product_name: available_qty} |
+| production_utilisation | REAL | 0.0–1.0 fraction of capacity used |
+| wallet_balance | REAL | End-of-day wallet |
+
+#### ProviderMetrics (supplier.db)
+
+| Column | Type | Description |
+|--------|------|-------------|
+| id | INTEGER PK | Auto-increment |
+| sim_day | INTEGER | Simulation day |
+| stock_json | TEXT | JSON: {material_name: stock_qty} |
+| prices_json | TEXT | JSON: {material_name: effective_price} |
+| orders_placed | INTEGER | Orders placed this day |
+| orders_delivered | INTEGER | Orders delivered this day |
+
+#### RetailerMetrics (retailer.db)
+
+| Column | Type | Description |
+|--------|------|-------------|
+| id | INTEGER PK | Auto-increment |
+| sim_day | INTEGER | Simulation day |
+| printer_stock_json | TEXT | JSON: {model_name: stock_qty} |
+| prices_json | TEXT | JSON: {model_name: retail_price} |
+| customer_orders_placed | INTEGER | New orders this day |
+| customer_orders_fulfilled | INTEGER | Orders fulfilled this day |
+| customer_orders_backordered | INTEGER | Active backorders |
+| wallet_balance | REAL | End-of-day retailer wallet |
+
+### 10.2 Analysis Pipeline
+
+`analysis.py` is a standalone script that reads all three metrics databases and generates four matplotlib charts.
+
+#### Usage
+
+```bash
+python analysis.py [--scenario LABEL] [--output-dir DIR]
+```
+
+Expects `simulator.db`, `supplier.db`, and `retailer.db` in the current directory (or override via flags).
+
+#### Chart Types
+
+| Chart | Description |
+|-------|-------------|
+| **Inventory over Time** | Line chart: parts stock, manufacturer finished stock, retailer printer stock per day |
+| **Prices over Time** | Line chart: per-material effective prices at Provider, per-SKU retail prices at Retailer |
+| **Order Fulfillment** | Grouped bar chart: orders placed vs fulfilled vs backordered per day at Retailer |
+| **Scenario Events Overlay** | Shaded regions on any chart showing active scenario event windows |
+
+#### Side-by-Side Comparison
+
+Running `analysis.py` against two separate scenario snapshots (calm-market vs holiday-rush databases) produces comparable charts illustrating the effect of compound market events on inventory levels, pricing, and fulfillment rates.
+
+---
+
+## 11. Dashboard API and SimDashboard Frontend
+
+### 11.1 Dashboard API (`app/api/dashboard.py`)
+
+Mounted at `/api/dashboard/`, these two endpoints provide a single-call view of all three apps and a one-click simulation turn.
+
+#### GET /api/dashboard/state
+
+Returns combined JSON:
+
+```json
+{
+  "turn":         { "day": N, "demands_injected": 0, "produced": 0, "deliveries": 0, "expired_demands": 0 },
+  "scenario":     { "name": "...", "active_events": [...], "demand_modifier": 1.0, "supply_modifier": 1.0, "lead_time_modifier": 1.0 },
+  "manufacturer": { "day": N, "wallet": F, "parts_stock": {...}, "finished_stock": {...}, "utilisation": F, "open_demands": N, "active_mos": N },
+  "retailer":     { "day": N, "wallet": F, "stock": {...}, "prices": {...}, "open_orders": N, "fulfilled_orders": N, "backordered": N },
+  "provider":     { "day": N, "stock": {...}, "prices": {...}, "pending_orders": N },
+  "metrics_history": [ { "day": N, "mfg_wallet": F, "ret_wallet": F, "parts_stock": N, "finished_stock": N, "ret_stock": N, "produced": F, "fulfilled": N, "backordered": N }, ... ]
+}
+```
+
+Optional query parameter: `?scenario_file=scenarios/holiday-rush.json` to include active scenario signal.
+
+#### POST /api/dashboard/run-turn
+
+Runs one complete simulation turn with autopilot:
+
+1. Load scenario and compute today's signal
+2. Inject customer demand into Retailer via `generate_customer_orders()`
+3. Autopilot retailer: fulfill pending orders; restock from Manufacturer if stock < 5
+4. Autopilot manufacturer: purchase materials if available < 80; create + release MOs for open demand/sales orders; fulfill demand orders and sales orders from finished goods
+5. Advance Retailer: `POST /api/game/advance-day`
+6. Advance Manufacturer: `advance_day(db)` — this also internally advances Provider
+7. Return combined state (same shape as GET /state)
+
+Query parameter: `?scenario_file=scenarios/holiday-rush.json`
+
+### 11.2 SimDashboard Frontend Tab
+
+`frontend/src/components/Tabs/SimDashboard.jsx` is the React tab for monitoring and driving the three-app simulation from the browser.
+
+#### Features
+
+- **Three-panel layout**: Manufacturer card (wallet, parts stock, finished stock, utilisation), Retailer card (wallet, stock per SKU, backordered), Provider card (stock, pending orders)
+- **Scenario selector**: dropdown to choose between scenario files
+- **Run Turn button**: calls `POST /api/dashboard/run-turn`, updates all three panels
+- **Auto-Run toggle**: runs one turn every 3 seconds automatically (uses `setInterval`); Play/Pause button with Lucide icons
+- **Turn result display**: shows demands injected, units produced, deliveries, expired demands, autopilot actions per turn
+- **Active events display**: lists scenario events active on the current day with their modifiers
+- **Metrics history table**: scrollable table of last 30 days showing wallet balances, stock levels, fulfillment counts
+- **Reset button**: calls `POST /api/game/reset` on Manufacturer to start a fresh run
+
+---
+
+## 12. Business Rules
+
+| Rule | Value |
+|------|-------|
+| Starting wallet (Manufacturer) | €10,000 (configurable on reset) |
+| Starting wallet (Retailer) | €50,000 (configurable on reset) |
+| Daily fixed cost | €500 |
+| Variable cost per unit produced | €50 |
+| Energy cost per assembly hour | €10 |
+| Maintenance | 5% of total daily cost |
+| Late/lost demand penalty | €50 per unfulfilled unit |
+| Game over trigger | 3 consecutive days with negative wallet (Manufacturer) |
+| Default warehouse capacity | 10,000 units |
+| Default production capacity | 10 units/day (configurable on reset) |
+| Price fluctuation | ±10% daily (uniform random in [0.90, 1.10]) |
+| Demand orders per day | 1–2 (random, from Manufacturer's own demand generation) |
+| Demand due window | 3–7 days from request_day |
+| Pricing tiers | 1+ units: base; 10+: −10%; 50+: −18%; 100+: −25% |
+| Supplier reliability | Probability of on-time delivery; failure → 1–3 day delay |
+| Supplier stock replenishment | +15 units/day per product, max 500 |
+| Material reservation | Reserved when MO is released; consumed on completion; unreserved on cancel |
+| Finished goods accounting | Computed on-the-fly: completed MO qty − fulfilled demand qty − shipped sales qty |
+
+---
+
+## 13. Acceptance Criteria
+
+### Delivered (All Phases Complete)
+
+- [x] Three independently deployable FastAPI apps on ports 8001, 8002, 8003
+- [x] Separate SQLite databases — no cross-DB queries
+- [x] React 19 + Vite 5 + TailwindCSS v3 SPA served by Manufacturer API
+- [x] Full simulation day cycle with all 9 phases executing correctly
+- [x] Material reservation model prevents double-allocation
+- [x] Partial order release (release N < MO.quantity splits the MO)
+- [x] Wallet enforcement: no overdraft on purchase orders
+- [x] Warehouse capacity enforcement
+- [x] Game over after 3 consecutive days with negative wallet
+- [x] Import/export of full game state as JSON for all three apps
+- [x] Quantity-based pricing tiers (4 tiers per supplier-product)
+- [x] Stochastic delivery delays based on supplier reliability
+- [x] Retailer app with customer order lifecycle and B2B purchase orders to Manufacturer
+- [x] SalesOrder model on Manufacturer side for B2B inbound orders
+- [x] Turn Engine orchestrates all three apps in dependency order per day
+- [x] Three agent skill files (provider, manufacturer, retailer)
+- [x] `claude --print` agent invocation from Turn Engine
+- [x] Two named scenarios: calm-market and holiday-rush
+- [x] Compound scenario event modifiers (multiply numeric modifiers)
+- [x] ManufacturerMetrics, ProviderMetrics, RetailerMetrics tables written on every advance-day
+- [x] `analysis.py` generates four chart types from all three metrics databases
+- [x] Dashboard API (`/api/dashboard/state` and `/api/dashboard/run-turn`)
+- [x] SimDashboard frontend tab with auto-run, scenario selector, three-app panels
+- [x] 112 automated tests, all passing
+
+---
+
+## 14. Appendix
+
+### A. Initial Seed Data
+
+#### Products (Manufacturer)
+
+| id | name | type | sell_price | assembly_time_hours |
+|----|------|------|------------|---------------------|
+| 1 | P3D-Classic | finished | 699.00 | 2.0 |
+| 2 | P3D-Pro | finished | 1299.00 | 4.0 |
 
 #### Raw Materials
+
 | id | name | base_price |
 |----|------|------------|
 | 1 | ABS Filament Spool (1kg) | 25.00 |
@@ -1135,48 +769,24 @@ Each day produces:
 | 7 | Control Board v2.1 | 45.00 |
 | 8 | Hotend Assembly | 35.00 |
 
-#### BOM Example (Prosumer Printer X1)
-| product_id | material_id | qty_per_unit |
-|------------|-------------|--------------|
-| 2 | 1 | 2 |
-| 2 | 2 | 3 |
-| 2 | 3 | 4 |
-| 2 | 5 | 3 |
-| 2 | 6 | 6 |
-| 2 | 7 | 1 |
-| 2 | 8 | 1 |
+#### Suppliers (Provider)
 
-#### Suppliers
 | id | name | lead_time_days | reliability |
 |----|------|----------------|-------------|
 | 1 | Industrial Materials Co. | 3 | 0.95 |
 | 2 | QuickShip Components | 1 | 0.85 |
 | 3 | Global Sourcing Ltd | 7 | 0.98 |
 
-#### Default Configuration
+Each supplier carries all 8 materials, with 4 pricing tiers per supplier-product (96 total tier rows) and starting stock of 500 units per product.
+
+#### Default Daily Costs
+
 ```json
 {
-    "starting_wallet": 10000.00,
-    "warehouse_capacity": 10000,
-    "daily_production_capacity": 10,
-    "daily_costs": {
-        "fixed_cost": 500.00,
-        "variable_cost_per_unit": 50.00,
-        "energy_cost_per_hour": 10.00,
-        "maintenance_percentage": 0.05
-    },
-    "demand_generation": {
-        "orders_per_day_mean": 3,
-        "orders_per_day_variance": 2
-    },
-    "price_fluctuation": {
-        "daily_variation_percent": 0.10
-    },
-    "warnings": {
-        "wallet_warning_threshold": 2000.00,
-        "wallet_critical_threshold": 500.00,
-        "capacity_warning_threshold": 0.80
-    }
+  "fixed_cost": 500.00,
+  "variable_cost_per_unit": 50.00,
+  "energy_cost_per_hour": 10.00,
+  "maintenance_percentage": 0.05
 }
 ```
 
@@ -1184,15 +794,19 @@ Each day produces:
 
 | Term | Definition |
 |------|------------|
-| BOM | Bill of Materials - list of raw materials needed to produce a finished product |
+| BOM | Bill of Materials — list of raw materials needed per finished product unit |
 | Lead Time | Days between issuing a purchase order and receiving materials |
-| Demand Order | Customer request for finished printers (sales order) |
-| Manufacturing Order | Internal work order to produce finished goods |
-| Purchase Order | Request to supplier for raw materials |
-| Daily Capacity | Maximum number of printer units producible per day |
+| DemandOrder | Stochastic customer request generated by the Manufacturer's own demand engine |
+| SalesOrder | B2B order placed by the Retailer on the Manufacturer |
+| ManufacturingOrder | Internal work order to produce finished goods |
+| LocalPurchaseOrder | Manufacturer-side mirror of every PO placed with the Provider |
+| Compound Event | Two or more scenario events active simultaneously; numeric modifiers multiply |
+| Autopilot | Rule-based decision logic in `_autopilot_manufacturer` and `_autopilot_retailer` in `dashboard.py` that runs when `POST /api/dashboard/run-turn` is called |
+| Turn Engine | External Python orchestrator (`turn_engine.py`) that advances all three apps per simulated day |
+| Agent Context | Single-call JSON snapshot at `/api/agent/context` that gives an AI agent all information needed to make decisions for the current turn |
 
 ---
 
-*Document Version: 1.0*
-*Created: 2026-03-26*
-*Status: Ready for Review*
+*Document Version: 3.0*
+*Last Updated: 2026-05-28*
+*Status: Complete — All phases delivered*

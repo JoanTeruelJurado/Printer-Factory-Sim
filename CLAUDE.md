@@ -147,6 +147,7 @@ app/                          # Manufacturer API (port 8002)
     purchasing.py             # /api/suppliers/*, /api/purchase-orders endpoints
     sales.py                  # /api/sales-orders/* endpoints
     agent.py                  # /api/agent/context — full state for AI agents
+    dashboard.py              # /api/dashboard/* — simulation dashboard + autopilot
 
 supplier_api/                 # Provider API (standalone, port 8001)
   main.py                     # FastAPI app; calls init_db() + seed() on startup
@@ -180,6 +181,8 @@ turn_engine/                  # Turn Engine package (orchestrator)
 frontend/
   src/
     components/               # React components
+      Tabs/
+        SimDashboard.jsx      # Visual simulation dashboard: scenario selector, auto-run, 3-app status cards, SVG charts
     utils/                    # api.js helpers, constants.js
   dist/                       # Production build (served by Manufacturer API)
 
@@ -371,6 +374,8 @@ advance_day(db):
 | POST | /api/sales-orders | Create new sales order (from Retailer) |
 | PUT | /api/sales-orders/{id}/fulfill | Fulfill a sales order |
 | GET | /api/agent/context | Full game state snapshot for AI agents |
+| GET | /api/dashboard/state | Combined 3-app state snapshot for dashboard |
+| POST | /api/dashboard/run-turn | Run one simulation turn with autopilot (inject demand + advance all) |
 
 ### Provider API (port 8001)
 
@@ -421,6 +426,7 @@ advance_day(db):
 | GET | /api/purchases | List B2B purchase orders sent to manufacturer |
 | POST | /api/purchases | Issue new B2B purchase order to manufacturer |
 | GET | /api/agent/context | Full retailer state snapshot for AI agents |
+| GET | /api/metrics | Retailer metrics history for dashboard charts |
 
 ## Coding Conventions
 
@@ -522,6 +528,9 @@ pytest tests/ -v  # 112 tests, ~4s
 - `analysis.py` — matplotlib chart generation from metrics (inventory, prices, fulfillment, events overlay)
 - `retailer/api/agent.py` — `GET /api/agent/context` for retailer (full state snapshot for AI agents)
 - Enhanced engine signal display: shows active events, demand/supply/lead_time modifiers per day
+- `app/api/dashboard.py` — combined 3-app orchestration endpoint with built-in autopilot
+- `frontend/src/components/Tabs/SimDashboard.jsx` — visual simulation dashboard with scenario selector, auto-run, 3-app status cards, SVG charts
+- `retailer/api/game.py` — added `GET /api/metrics` for dashboard chart data
 
 ### Notable Bug Fixes
 - Missing `Client` seed record (FK violation on demand generation)
