@@ -115,7 +115,7 @@ Do NOT advance the day — the turn engine does that."""
 
     try:
         result = subprocess.run(
-            ["claude", "--print", "--prompt", prompt],
+            ["claude", "--print", "-p", prompt],
             capture_output=True,
             text=True,
             cwd=cwd,
@@ -139,12 +139,18 @@ Do NOT advance the day — the turn engine does that."""
         return msg
 
 
-def advance_all(urls: list[str]) -> dict[str, dict]:
-    """Advance all apps by calling POST /api/day/advance on each."""
+def advance_all(apps: list[dict]) -> dict[str, dict]:
+    """Advance all apps by calling their advance-day endpoint.
+
+    Each entry in *apps* is {"url": ..., "advance_path": ...}.
+    Manufacturer uses /api/game/advance-day; others use /api/day/advance.
+    """
     results = {}
-    for url in urls:
+    for app in apps:
+        url = app["url"]
+        path = app.get("advance_path", "/api/day/advance")
         try:
-            resp = httpx.post(f"{url}/api/day/advance", timeout=TIMEOUT)
+            resp = httpx.post(f"{url}{path}", timeout=TIMEOUT)
             resp.raise_for_status()
             results[url] = resp.json()
         except (httpx.ConnectError, httpx.HTTPStatusError) as e:
@@ -158,9 +164,13 @@ def run_day(day: int, config: dict, scenario: dict) -> dict:
     signal = todays_signal(day, scenario)
     signal["day"] = day
 
+    active = [e.get("name", "?") for e in signal.get("active_events", [])]
     print(f"\n{'='*60}")
-    print(f"  DAY {day}")
-    print(f"  Signal: demand_modifier={signal.get('demand_modifier', 1.0)}")
+    print(f"  DAY {day}  |  Events: {', '.join(active) if active else 'none'}")
+    print(f"  demand={signal.get('demand_modifier', 1.0):.1f}  "
+          f"supply={signal.get('supply_modifier', 1.0):.1f}  "
+          f"lead_time={signal.get('lead_time_modifier', 1.0):.1f}"
+          f"{'  price_sensitivity=' + signal['price_sensitivity'] if signal.get('price_sensitivity') else ''}")
     print(f"{'='*60}")
 
     # 1. Inject customer demand at each retailer
@@ -204,18 +214,53 @@ def run_day(day: int, config: dict, scenario: dict) -> dict:
             day=day,
         )
 
-    # 6. Advance all apps
-    all_urls = (
-        [r["url"] for r in config["retailers"]]
-        + [mfg["url"]]
-        + [p["url"] for p in config["providers"]]
+    # 6. Advance all apps (manufacturer uses a different endpoint path)
+    all_apps = (
+        [{"url": r["url"], "advance_path": "/api/day/advance"} for r in config["retailers"]]
+        + [{"url": mfg["url"], "advance_path": "/api/game/advance-day"}]
+        + [{"url": p["url"], "advance_path": "/api/day/advance"} for p in config["providers"]]
     )
-    advance_results = advance_all(all_urls)
+    advance_results = advance_all(all_apps)
 
-    print(f"  Day {day} complete. Advanced {len(advance_results)} app(s).")
+    # ── Per-turn summary line ──────────────────────────────────────────
+    # Query retailer for order counts to build the summary
+    fulfilled = 0
+    backordered = 0
+    for retailer in config["retailers"]:
+        try:
+            resp = httpx.get(
+                f"{retailer['url']}/api/orders",
+                params={"status": "fulfilled"},
+                timeout=TIMEOUT,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                fulfilled += len(data) if isinstance(data, list) else data.get("count", 0)
+        except (httpx.ConnectError, httpx.HTTPStatusError):
+            pass
+        try:
+            resp = httpx.get(
+                f"{retailer['url']}/api/orders",
+                params={"status": "backordered"},
+                timeout=TIMEOUT,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                backordered += len(data) if isinstance(data, list) else data.get("count", 0)
+        except (httpx.ConnectError, httpx.HTTPStatusError):
+            pass
+
+    summary_line = (
+        f"  Day {day}: {total_demand} customer orders / "
+        f"{fulfilled} fulfilled / {backordered} backordered"
+    )
+    print(summary_line)
+    _write_log(day, "summary", summary_line)
 
     return {
         "day": day,
         "demand_injected": total_demand,
+        "fulfilled": fulfilled,
+        "backordered": backordered,
         "advance_results": advance_results,
     }

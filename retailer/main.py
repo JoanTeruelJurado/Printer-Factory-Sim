@@ -11,6 +11,7 @@ from fastapi import FastAPI
 from retailer.database import init_db
 from retailer.seed import seed_retailer_data
 
+from retailer.api.agent import router as agent_router
 from retailer.api.catalog import router as catalog_router
 from retailer.api.orders import router as orders_router
 from retailer.api.purchases import router as purchases_router
@@ -23,6 +24,7 @@ app = FastAPI(
 )
 
 # ── Register routers ──────────────────────────────────────────────────────────
+app.include_router(agent_router, prefix="/api", tags=["agent"])
 app.include_router(catalog_router, prefix="/api", tags=["catalog"])
 app.include_router(orders_router, prefix="/api", tags=["orders"])
 app.include_router(purchases_router, prefix="/api", tags=["purchases"])

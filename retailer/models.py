@@ -121,3 +121,22 @@ class RetailerEvent(Base):
     entity_id = Column(Integer, nullable=True)
     detail = Column(String, nullable=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+class RetailerMetrics(Base):
+    """Daily metrics snapshot for post-run analysis."""
+
+    __tablename__ = "retailer_metrics"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    sim_day = Column(Integer, nullable=False)
+    # Stock per model stored as JSON: {"P3D-Classic": 5, "P3D-Pro": 3}
+    printer_stock_json = Column(String, nullable=False, default="{}")
+    # Retail price per model stored as JSON
+    retail_price_json = Column(String, nullable=False, default="{}")
+    # Order counts for this day
+    customer_orders_placed = Column(Integer, nullable=False, default=0)
+    customer_orders_fulfilled = Column(Integer, nullable=False, default=0)
+    customer_orders_backordered = Column(Integer, nullable=False, default=0)
+    wallet_balance = Column(Float, nullable=False, default=0.0)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)

@@ -5,7 +5,7 @@
       "url": "http://localhost:8003",
       "port": 8003,
       "path": ".",
-      "skill": null
+      "skill": "skills/retail-manager.md"
     }
   ],
   "manufacturer": {
@@ -21,7 +21,7 @@
       "url": "http://localhost:8001",
       "port": 8001,
       "path": ".",
-      "skill": null
+      "skill": "skills/provider-manager.md"
     }
   ]
 }

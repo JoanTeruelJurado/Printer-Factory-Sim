@@ -104,6 +104,14 @@ No app touches another app's database directly. All cross-service communication 
 
 22. **Three-DB Isolation** (Week 7): `retailer.db` is owned exclusively by the Retailer API. The Retailer purchases finished printers from the Manufacturer via HTTP (mirroring the Manufacturer↔Provider pattern). `RetailerPurchaseOrder` in `retailer.db` mirrors every B2B order placed, and `CustomerOrder` tracks end-customer sales.
 
+23. **Three Autonomous Agents** (Week 8): All three roles (provider, manufacturer, retailer) have skill files in `skills/`. The Turn Engine invokes `claude --print` for each role per day, passing market signals and game context. Agents make CLI decisions independently; coordination emerges through shared world state (databases).
+
+24. **Compound Scenario Events** (Week 8): Overlapping scenario events multiply numeric modifiers (`demand_modifier`, `supply_modifier`, `lead_time_modifier`). String hints (`price_sensitivity`) use last-writer-wins. This enables realistic compound stress (e.g., chip shortage during Christmas = demand 3.75x, supply 0.24x).
+
+25. **Per-App Metrics Tables** (Week 8): Each app snapshots key indicators (stock, prices, order counts, wallet) into a `*_metrics` table on every `advance-day`. These time-series are queryable by `sim_day` and plotted by `analysis.py` for post-run analysis.
+
+26. **Analysis Pipeline** (Week 8): `analysis.py` reads all three metrics tables and generates four matplotlib charts: inventory over time, prices over time, order fulfillment bars, and scenario events overlay. Supports side-by-side comparison of calm vs volatile scenarios.
+
 ## File Structure
 
 ```
@@ -114,7 +122,7 @@ app/                          # Manufacturer API (port 8002)
     models.py                 # ORM: GameState, DailyCosts, Config, Client,
                               #   Product, RawMaterial, BOM, Inventory,
                               #   ManufacturingOrder, DemandOrder, SalesOrder,
-                              #   Event, LocalPurchaseOrder
+                              #   Event, LocalPurchaseOrder, ManufacturerMetrics
   schemas/
     __init__.py
     inventory.py              # InventoryItemResponse
@@ -190,10 +198,15 @@ config/
 
 scenarios/
   smoke-test.json             # Minimal scenario for CI integration tests
+  calm-market.json            # 25-day stable baseline (control group)
+  holiday-rush.json           # 25-day volatile: Black Friday + chip shortage + Christmas
 
 skills/
   manufacturer-manager.md     # Agent skill: manage manufacturer production + purchasing
+  provider-manager.md         # Agent skill: manage provider stock + pricing
+  retail-manager.md           # Agent skill: manage retailer fulfillment + purchasing + pricing
 
+analysis.py                   # Post-run chart generation (matplotlib) from metrics DBs
 manufacturer_cli.py           # CLI for Manufacturer API (manufacturer-cli entrypoint)
 manufacturer-cli              # Executable wrapper for manufacturer_cli.py
 provider_cli.py               # CLI for Provider API (provider-cli entrypoint)
@@ -228,6 +241,7 @@ pytest.ini                    # testpaths = tests, asyncio_mode = auto
 | `sales_orders` | B2B orders from Retailer (status: pending → fulfilled / cancelled) |
 | `purchase_orders` | Local mirror of POs placed (status: pending / delivered) |
 | `events` | Append-only audit log (event_type, sim_day, category, details JSON) |
+| `manufacturer_metrics` | Daily snapshots: parts stock, finished stock, utilisation, prices, wallet |
 
 ### Provider DB (supplier.db)
 
@@ -240,6 +254,7 @@ pytest.ini                    # testpaths = tests, asyncio_mode = auto
 | `purchase_orders` | All POs; status: pending → shipped → delivered → received (+ delayed) |
 | `sim_state` | Key-value store for supplier current_day |
 | `supplier_events` | Supplier-side audit log (order_placed, order_shipped, order_delivered, order_delayed, price_changed, day_advanced, stock_updated) |
+| `provider_metrics` | Daily snapshots: stock per product, prices, order counts |
 
 ### Retailer DB (retailer.db)
 
@@ -251,6 +266,7 @@ pytest.ini                    # testpaths = tests, asyncio_mode = auto
 | `retailer_stock` | On-hand finished printer inventory per catalog item |
 | `retailer_game_state` | Singleton: current_day, wallet_balance, game_over |
 | `retailer_events` | Append-only audit log for retailer-side events |
+| `retailer_metrics` | Daily snapshots: stock per model, prices, orders placed/fulfilled/backordered |
 
 ### Relationships
 
@@ -448,7 +464,7 @@ pytest tests/ -v  # 112 tests, ~4s
 
 ## Current State
 
-*Last Updated: 2026-05-21*
+*Last Updated: 2026-05-27*
 *All phases complete ✅ — 112/112 tests passing*
 
 ### Completed Phases
@@ -464,6 +480,7 @@ pytest tests/ -v  # 112 tests, ~4s
 | — | Two-server refactor: Supplier API split into standalone service | ✅ |
 | W6 | Week 6: provider app + manufacturer supply chain integration | ✅ |
 | W7 | Week 7: Retailer app, sales orders, turn engine orchestration, agent skills, integration tests | ✅ |
+| W8 | Week 8: Three autonomous agents, scenario design, metrics, analysis | ✅ |
 
 ### Week 6 Additions
 - `manufacturer_cli.py` / `provider_cli.py` — full CLIs for both apps
@@ -490,6 +507,21 @@ pytest tests/ -v  # 112 tests, ~4s
 - `GET /api/sales-orders` + `POST /api/sales-orders` + `PUT /api/sales-orders/{id}/fulfill` on Manufacturer API
 - Manufacturer API moved from port 8000 to port 8002
 - `test_retailer.py` — 14 new tests covering retailer orders, purchases, catalog, and game state
+
+### Week 8 Additions
+- `skills/provider-manager.md` — agent skill for provider stock management + pricing decisions
+- `skills/retail-manager.md` — agent skill for retailer fulfillment + purchasing + pricing decisions
+- `scenarios/calm-market.json` — 25-day stable baseline scenario (control group)
+- `scenarios/holiday-rush.json` — 25-day volatile scenario with 4 overlapping events (Black Friday, chip shortage, Christmas)
+- `config/sim.json` updated — all three agent skill files now referenced (provider, manufacturer, retailer)
+- Compound event support in `turn_engine/config.py` — overlapping events multiply modifiers (demand, supply, lead_time)
+- `ManufacturerMetrics` table in `simulator.db` — daily snapshots of parts stock, finished stock, utilisation, prices, wallet
+- `ProviderMetrics` table in `supplier.db` — daily snapshots of stock, prices, order counts
+- `RetailerMetrics` table in `retailer.db` — daily snapshots of stock, prices, orders placed/fulfilled/backordered
+- Per-turn summary line in engine output: `Day N: X orders / Y fulfilled / Z backordered`
+- `analysis.py` — matplotlib chart generation from metrics (inventory, prices, fulfillment, events overlay)
+- `retailer/api/agent.py` — `GET /api/agent/context` for retailer (full state snapshot for AI agents)
+- Enhanced engine signal display: shows active events, demand/supply/lead_time modifiers per day
 
 ### Notable Bug Fixes
 - Missing `Client` seed record (FK violation on demand generation)

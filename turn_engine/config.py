@@ -59,19 +59,26 @@ def todays_signal(day: int, scenario: dict) -> dict:
     """Extract today's market signal from the scenario.
 
     Checks which events are active for the current day (start_day <= day <=
-    end_day) and merges them.  The last matching event's demand_modifier wins.
+    end_day) and compounds them.  Numeric modifiers (demand_modifier,
+    supply_modifier, lead_time_modifier) are **multiplied** across all
+    overlapping events so that concurrent stress stacks realistically.
+    String hints (price_sensitivity) use last-writer-wins.
     base_demand is taken from the scenario top-level default, overridden by
-    the event if present.
+    the last active event that defines it.
 
     Args:
         day: The current simulation day.
         scenario: A loaded scenario dictionary.
 
     Returns:
-        A signal dict with at least 'base_demand' and 'demand_modifier' keys.
+        A signal dict with base_demand, demand_modifier, supply_modifier,
+        lead_time_modifier, price_sensitivity, and active_events.
     """
     base_demand = scenario.get("base_demand", {"mean": 5, "variance": 2})
     demand_modifier = 1.0
+    supply_modifier = 1.0
+    lead_time_modifier = 1.0
+    price_sensitivity: str | None = None
 
     active_events: list[dict] = []
     for event in scenario.get("events", []):
@@ -80,12 +87,21 @@ def todays_signal(day: int, scenario: dict) -> dict:
 
     for event in active_events:
         if "demand_modifier" in event:
-            demand_modifier = event["demand_modifier"]
+            demand_modifier *= event["demand_modifier"]
+        if "supply_modifier" in event:
+            supply_modifier *= event["supply_modifier"]
+        if "lead_time_modifier" in event:
+            lead_time_modifier *= event["lead_time_modifier"]
+        if "price_sensitivity" in event:
+            price_sensitivity = event["price_sensitivity"]
         if "base_demand" in event:
             base_demand = event["base_demand"]
 
     return {
         "base_demand": base_demand,
         "demand_modifier": demand_modifier,
+        "supply_modifier": supply_modifier,
+        "lead_time_modifier": lead_time_modifier,
+        "price_sensitivity": price_sensitivity,
         "active_events": active_events,
     }

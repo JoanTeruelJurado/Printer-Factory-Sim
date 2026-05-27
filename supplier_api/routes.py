@@ -38,6 +38,7 @@ from sqlalchemy.orm import Session
 from supplier_api.database import get_db
 from supplier_api.models import (
     PricingTier,
+    ProviderMetrics,
     PurchaseOrder,
     SimState,
     Stock,
@@ -772,6 +773,33 @@ def api_advance_day(db: Session = Depends(get_db)) -> dict:
         "orders_shipped": shipped,
         "orders_delayed": delayed_orders,
     })
+
+    # ── Step 5: snapshot metrics ─────────────────────────────────────────
+    stock_snap = {}
+    price_snap = {}
+    for sp in db.query(SupplierProduct).all():
+        st = db.query(Stock).filter_by(supplier_product_id=sp.id).first()
+        stock_snap[sp.material_name] = st.quantity if st else 0
+        top_tier = (
+            db.query(PricingTier)
+            .filter_by(supplier_product_id=sp.id)
+            .order_by(PricingTier.min_quantity.desc())
+            .first()
+        )
+        price_snap[sp.material_name] = top_tier.unit_price if top_tier else sp.base_unit_cost
+
+    pending_count = db.query(PurchaseOrder).filter(PurchaseOrder.status == "pending").count()
+    shipped_count = db.query(PurchaseOrder).filter(PurchaseOrder.status == "shipped").count()
+    delivered_count = db.query(PurchaseOrder).filter(PurchaseOrder.status.in_(["delivered", "received"])).count()
+
+    db.add(ProviderMetrics(
+        sim_day=current_day,
+        stock_json=json.dumps(stock_snap),
+        price_json=json.dumps(price_snap),
+        orders_pending=pending_count,
+        orders_shipped=shipped_count,
+        orders_delivered=delivered_count,
+    ))
 
     db.commit()
     return {

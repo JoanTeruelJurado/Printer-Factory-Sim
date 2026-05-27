@@ -216,3 +216,25 @@ class Config(Base):
     key = Column(String, primary_key=True)
     value = Column(Text, nullable=False)
     description = Column(Text, nullable=True)
+
+
+class ManufacturerMetrics(Base):
+    """Daily metrics snapshot for post-run analysis."""
+
+    __tablename__ = "manufacturer_metrics"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    sim_day = Column(Integer, nullable=False)
+    # Parts (raw material) stock as JSON: {"pcb": 45, "extruder": 30}
+    parts_stock_json = Column(Text, nullable=False, default="{}")
+    # Finished printer stock as JSON: {"P3D-Classic": 5}
+    finished_stock_json = Column(Text, nullable=False, default="{}")
+    # Production utilisation: units produced / capacity
+    production_utilisation = Column(Float, nullable=False, default=0.0)
+    # Wholesale price per model as JSON
+    wholesale_price_json = Column(Text, nullable=False, default="{}")
+    # Sales order counts
+    sales_orders_pending = Column(Integer, nullable=False, default=0)
+    sales_orders_completed = Column(Integer, nullable=False, default=0)
+    wallet_balance = Column(Float, nullable=False, default=0.0)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)

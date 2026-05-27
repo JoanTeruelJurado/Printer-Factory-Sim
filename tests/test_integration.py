@@ -213,7 +213,11 @@ def test_advance_all_with_mock():
     mock_resp.raise_for_status = MagicMock()
 
     with patch("turn_engine.engine.httpx.post", return_value=mock_resp) as mock_post:
-        results = advance_all(["http://a:1", "http://b:2"])
+        apps = [
+            {"url": "http://a:1", "advance_path": "/api/day/advance"},
+            {"url": "http://b:2", "advance_path": "/api/game/advance-day"},
+        ]
+        results = advance_all(apps)
         assert len(results) == 2
         assert mock_post.call_count == 2
 

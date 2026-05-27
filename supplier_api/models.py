@@ -131,3 +131,21 @@ class PurchaseOrder(Base):
     total_cost = Column(Float, nullable=False)
 
     supplier = relationship("Supplier", back_populates="purchase_orders")
+
+
+class ProviderMetrics(Base):
+    """Daily metrics snapshot for post-run analysis."""
+
+    __tablename__ = "provider_metrics"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    sim_day = Column(Integer, nullable=False)
+    # Stock per product stored as JSON: {"pcb": 450, "extruder": 380}
+    stock_json = Column(String, nullable=False, default="{}")
+    # Price per product (top tier) stored as JSON
+    price_json = Column(String, nullable=False, default="{}")
+    # Order counts for this day
+    orders_pending = Column(Integer, nullable=False, default=0)
+    orders_shipped = Column(Integer, nullable=False, default=0)
+    orders_delivered = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)

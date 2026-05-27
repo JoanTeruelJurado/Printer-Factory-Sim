@@ -1,0 +1,15 @@
+{
+  "scenario_name": "Calm Market — Steady Baseline",
+  "base_demand": {"mean": 4, "variance": 1},
+  "base_price": 400.0,
+  "events": [
+    {
+      "name": "normal",
+      "start_day": 1,
+      "end_day": 25,
+      "demand_modifier": 1.0,
+      "supply_modifier": 1.0,
+      "description": "Business as usual — stable demand, stable supply"
+    }
+  ]
+}

@@ -13,14 +13,17 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 from app.db.models import (
+    BOM,
     DemandOrder,
     DailyCosts,
     Event,
     GameState,
     Inventory,
     LocalPurchaseOrder,
+    ManufacturerMetrics,
     ManufacturingOrder,
     Product,
+    RawMaterial,
     SalesOrder,
 )
 from app.services import supplier_client
@@ -809,11 +812,55 @@ def advance_day(db: Session) -> dict:
         
         # 7. Check game over
         is_game_over = check_game_over(db, current_day)
-        
-        # 8. Advance day counter
+
+        # 8. Snapshot metrics
+        parts_snap = {}
+        for inv in db.query(Inventory).all():
+            mat = db.query(RawMaterial).filter_by(id=inv.material_id).first()
+            if mat:
+                parts_snap[mat.name] = inv.quantity - inv.reserved_quantity
+
+        finished_snap = {}
+        wholesale_snap = {}
+        for prod in db.query(Product).filter_by(product_type="finished").all():
+            completed_qty = (
+                db.query(ManufacturingOrder)
+                .filter_by(product_id=prod.id, status="completed")
+                .with_entities(ManufacturingOrder.quantity)
+                .all()
+            )
+            total_completed = sum(q[0] for q in completed_qty)
+            fulfilled_qty = (
+                db.query(DemandOrder)
+                .filter_by(product_id=prod.id, status="fulfilled")
+                .with_entities(DemandOrder.quantity)
+                .all()
+            )
+            total_fulfilled = sum(q[0] for q in fulfilled_qty)
+            finished_snap[prod.name] = max(0, total_completed - total_fulfilled)
+            wholesale_snap[prod.name] = prod.sell_price or 0.0
+
+        total_produced = production_stats["produced"] + sales_production_stats["produced"]
+        utilisation = total_produced / game_state.daily_production_capacity if game_state.daily_production_capacity > 0 else 0.0
+
+        pending_so = db.query(SalesOrder).filter(SalesOrder.status.in_(["pending", "released"])).count()
+        completed_so = db.query(SalesOrder).filter(SalesOrder.status.in_(["completed", "shipped", "delivered"])).count()
+
+        db.add(ManufacturerMetrics(
+            sim_day=current_day,
+            parts_stock_json=json.dumps(parts_snap),
+            finished_stock_json=json.dumps(finished_snap),
+            production_utilisation=utilisation,
+            wholesale_price_json=json.dumps(wholesale_snap),
+            sales_orders_pending=pending_so,
+            sales_orders_completed=completed_so,
+            wallet_balance=game_state.wallet_balance,
+        ))
+
+        # 9. Advance day counter
         game_state.current_day += 1
         game_state.last_updated = datetime.utcnow()
-        
+
         db.commit()
         
         return {

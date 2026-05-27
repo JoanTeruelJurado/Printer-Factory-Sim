@@ -13,6 +13,7 @@ from retailer.models import (
     CustomerOrder,
     RetailerEvent,
     RetailerGameState,
+    RetailerMetrics,
     RetailerPurchaseOrder,
     RetailerStock,
 )
@@ -147,10 +148,38 @@ def advance_day(db: Session = Depends(get_db)) -> AdvanceDayResponse:
                 }),
             ))
 
-    # ── 3. Increment current_day ───────────────────────────────────────────
+    # ── 3. Snapshot metrics before advancing ────────────────────────────────
+    stock_snap = {}
+    price_snap = {}
+    for s in db.query(RetailerStock).all():
+        stock_snap[s.model_name] = s.quantity_on_hand
+    for c in db.query(Catalog).all():
+        price_snap[c.model_name] = c.retail_price
+
+    orders_placed = db.query(CustomerOrder).filter(CustomerOrder.order_day == current_day).count()
+    orders_fulfilled = db.query(CustomerOrder).filter(
+        CustomerOrder.fulfilled_day == current_day,
+        CustomerOrder.status == "fulfilled",
+    ).count()
+    orders_backordered = db.query(CustomerOrder).filter(
+        CustomerOrder.order_day == current_day,
+        CustomerOrder.status == "backordered",
+    ).count()
+
+    db.add(RetailerMetrics(
+        sim_day=current_day,
+        printer_stock_json=json.dumps(stock_snap),
+        retail_price_json=json.dumps(price_snap),
+        customer_orders_placed=orders_placed,
+        customer_orders_fulfilled=orders_fulfilled + summary["backorders_fulfilled"],
+        customer_orders_backordered=orders_backordered,
+        wallet_balance=state.wallet_balance,
+    ))
+
+    # ── 4. Increment current_day ───────────────────────────────────────────
     state.current_day += 1
 
-    # ── 4. Log day-advance event and commit ────────────────────────────────
+    # ── 5. Log day-advance event and commit ────────────────────────────────
     db.add(RetailerEvent(
         sim_day=state.current_day,
         event_type="DAY_ADVANCED",
