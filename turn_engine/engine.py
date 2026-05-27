@@ -214,11 +214,12 @@ def run_day(day: int, config: dict, scenario: dict) -> dict:
             day=day,
         )
 
-    # 6. Advance all apps (manufacturer uses a different endpoint path)
+    # 6. Advance all apps (manufacturer uses a different endpoint path).
+    # Provider is NOT advanced here — the manufacturer's advance_day()
+    # already calls supplier_client.advance_supplier_day() internally.
     all_apps = (
         [{"url": r["url"], "advance_path": "/api/day/advance"} for r in config["retailers"]]
         + [{"url": mfg["url"], "advance_path": "/api/game/advance-day"}]
-        + [{"url": p["url"], "advance_path": "/api/day/advance"} for p in config["providers"]]
     )
     advance_results = advance_all(all_apps)
 
