@@ -208,6 +208,27 @@ def list_stock(db: Session = Depends(get_db)) -> StockListResponse:
     )
 
 
+@router.get("/metrics")
+def get_metrics(db: Session = Depends(get_db)) -> list[dict]:
+    """Return retailer metrics history for dashboard charts."""
+    rows = (
+        db.query(RetailerMetrics)
+        .order_by(RetailerMetrics.sim_day)
+        .all()
+    )
+    return [
+        {
+            "sim_day": r.sim_day,
+            "wallet_balance": r.wallet_balance,
+            "printer_stock_json": r.printer_stock_json,
+            "customer_orders_placed": r.customer_orders_placed,
+            "customer_orders_fulfilled": r.customer_orders_fulfilled,
+            "customer_orders_backordered": r.customer_orders_backordered,
+        }
+        for r in rows
+    ]
+
+
 @router.get("/export")
 def export_retailer(db: Session = Depends(get_db)) -> JSONResponse:
     """Export full retailer state as a downloadable JSON snapshot."""

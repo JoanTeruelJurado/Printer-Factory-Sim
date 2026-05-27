@@ -4,7 +4,7 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from app.api import agent, game, manufacturing, purchasing, sales
+from app.api import agent, dashboard, game, manufacturing, purchasing, sales
 from app.db.database import init_db
 from app.services.seed import seed_initial_data
 
@@ -20,6 +20,7 @@ app.include_router(manufacturing.router, prefix="/api", tags=["manufacturing"])
 app.include_router(purchasing.router, prefix="/api", tags=["purchasing"])
 app.include_router(agent.router, prefix="/api", tags=["agent"])
 app.include_router(sales.router, prefix="/api", tags=["sales"])
+app.include_router(dashboard.router, prefix="/api/dashboard", tags=["dashboard"])
 app.mount("/assets", StaticFiles(directory=FRONTEND_DIR / "assets"), name="assets")
 
 
