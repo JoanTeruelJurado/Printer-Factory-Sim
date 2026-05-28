@@ -12,4 +12,3 @@ coverage/
 htmlcov/
 logs/
 node_modules/
-*.pptx
