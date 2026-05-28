@@ -254,6 +254,7 @@ const SimDashboard = ({ gameState, onRefresh, onToast }) => {
   const [loading, setLoading] = useState(false);
   const [autoRun, setAutoRun] = useState(false);
   const [scenario, setScenario] = useState('scenarios/holiday-rush.json');
+  const [mode, setMode] = useState('heuristic'); // 'heuristic' or 'ai'
   const [scenarioEvents, setScenarioEvents] = useState([]);
   const [eventLogs, setEventLogs] = useState(null);
   const [showEvents, setShowEvents] = useState(false);
@@ -288,7 +289,7 @@ const SimDashboard = ({ gameState, onRefresh, onToast }) => {
   const runTurn = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await fetch(`/api/dashboard/run-turn?scenario_file=${encodeURIComponent(scenario)}`, {
+      const res = await fetch(`/api/dashboard/run-turn?scenario_file=${encodeURIComponent(scenario)}&mode=${mode}`, {
         method: 'POST',
       });
       if (res.ok) {
@@ -301,7 +302,7 @@ const SimDashboard = ({ gameState, onRefresh, onToast }) => {
     } finally {
       setLoading(false);
     }
-  }, [scenario, onRefresh]);
+  }, [scenario, mode, onRefresh]);
 
   // Load state + scenario on mount and scenario change
   useEffect(() => {
@@ -376,10 +377,33 @@ const SimDashboard = ({ gameState, onRefresh, onToast }) => {
           </select>
         </div>
 
+        <div className="flex items-center gap-1 bg-gray-100 dark:bg-gray-700 rounded-lg p-1">
+          <button
+            onClick={() => setMode('heuristic')}
+            className={`px-3 py-1.5 rounded-md text-xs font-medium transition ${
+              mode === 'heuristic'
+                ? 'bg-white dark:bg-gray-600 text-gray-900 dark:text-gray-100 shadow-sm'
+                : 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200'
+            }`}
+          >
+            Code
+          </button>
+          <button
+            onClick={() => setMode('ai')}
+            className={`px-3 py-1.5 rounded-md text-xs font-medium transition ${
+              mode === 'ai'
+                ? 'bg-purple-600 text-white shadow-sm'
+                : 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200'
+            }`}
+          >
+            AI Agents
+          </button>
+        </div>
+
         <button onClick={runTurn} disabled={loading}
-          className="flex items-center gap-2 px-4 py-2 bg-green-600 hover:bg-green-700 disabled:bg-gray-400 text-white rounded-lg font-medium transition text-sm">
+          className={`flex items-center gap-2 px-4 py-2 ${mode === 'ai' ? 'bg-purple-600 hover:bg-purple-700' : 'bg-green-600 hover:bg-green-700'} disabled:bg-gray-400 text-white rounded-lg font-medium transition text-sm`}>
           <Play size={16} />
-          {loading ? 'Running...' : 'Run 1 Day'}
+          {loading ? (mode === 'ai' ? 'AI Thinking...' : 'Running...') : 'Run 1 Day'}
         </button>
 
         <button onClick={() => setAutoRun((v) => !v)}
@@ -441,6 +465,32 @@ const SimDashboard = ({ gameState, onRefresh, onToast }) => {
           <p className="text-sm text-gray-500 dark:text-gray-400">Normal market conditions</p>
         )}
       </div>
+
+      {/* ─── AI Agent Output (only in AI mode) ─── */}
+      {turn?.mode === 'ai' && turn?.autopilot && (
+        <div className="bg-purple-50 dark:bg-purple-950 border border-purple-200 dark:border-purple-800 rounded-lg shadow p-4 space-y-3">
+          <h3 className="text-sm font-semibold text-purple-800 dark:text-purple-200 flex items-center gap-2">
+            <span className="inline-block w-2 h-2 rounded-full bg-purple-500 animate-pulse" />
+            AI Agent Decisions (Day {turn.day})
+          </h3>
+          {turn.autopilot.manufacturer?.ai_output && (
+            <div>
+              <h4 className="text-xs font-semibold text-purple-700 dark:text-purple-300 mb-1">Manufacturer Agent</h4>
+              <pre className="text-xs text-purple-900 dark:text-purple-100 bg-purple-100 dark:bg-purple-900 rounded p-2 overflow-x-auto whitespace-pre-wrap max-h-40 overflow-y-auto">
+                {turn.autopilot.manufacturer.ai_output}
+              </pre>
+            </div>
+          )}
+          {turn.autopilot.retailer?.ai_output && (
+            <div>
+              <h4 className="text-xs font-semibold text-purple-700 dark:text-purple-300 mb-1">Retailer Agent</h4>
+              <pre className="text-xs text-purple-900 dark:text-purple-100 bg-purple-100 dark:bg-purple-900 rounded p-2 overflow-x-auto whitespace-pre-wrap max-h-40 overflow-y-auto">
+                {turn.autopilot.retailer.ai_output}
+              </pre>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* ─── Three-App Status Cards ─── */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">

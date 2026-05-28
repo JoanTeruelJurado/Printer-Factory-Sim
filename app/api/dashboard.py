@@ -7,6 +7,8 @@ Provides two endpoints:
 """
 
 import json
+import subprocess
+from pathlib import Path
 from typing import Optional
 
 import httpx
@@ -418,6 +420,7 @@ def _build_combined_state(
             "deliveries": turn_result.get("deliveries", 0),
             "expired_demands": turn_result.get("expired_demands", 0),
             "autopilot": turn_result.get("autopilot"),
+            "mode": turn_result.get("mode"),
         }
 
     # Metrics history
@@ -637,19 +640,99 @@ def _autopilot_retailer() -> dict:
     return actions
 
 
+def _run_ai_agent(role: str, skill_path: str, context: dict, day: int) -> str:
+    """Invoke claude --print with a skill file and game context.
+
+    Returns the agent's text output (decisions + summary).
+    """
+    project_root = str(Path(__file__).resolve().parent.parent.parent)
+    context_str = json.dumps(context, default=str)
+
+    prompt = (
+        f"Read the skill file at {skill_path}.\n"
+        f"Today's context: {context_str}\n"
+        f"Execute your daily decisions following the skill's decision framework.\n"
+        f"Do NOT advance the day — the turn engine does that."
+    )
+
+    try:
+        result = subprocess.run(
+            ["claude", "--print", "-p", prompt],
+            capture_output=True,
+            text=True,
+            cwd=project_root,
+            timeout=180,
+        )
+        output = result.stdout
+        if result.stderr:
+            output += f"\n--- stderr ---\n{result.stderr}"
+        # Write log
+        log_dir = Path(project_root) / "logs"
+        log_dir.mkdir(exist_ok=True)
+        (log_dir / f"day-{day:03d}-{role}.log").write_text(output, encoding="utf-8")
+        return output
+    except subprocess.TimeoutExpired:
+        return f"[{role}] TIMEOUT after 180s"
+    except FileNotFoundError:
+        return f"[{role}] claude command not found"
+
+
+def _ai_agents_turn(db: Session, current_day: int, signal: dict) -> dict:
+    """Run AI agents for manufacturer and retailer roles.
+
+    Returns a summary dict with agent outputs.
+    """
+    # Build rich context (same as turn engine)
+    context: dict = {"day": current_day, "signal": signal}
+
+    # Fetch manufacturer context
+    try:
+        resp = httpx.get(f"http://localhost:8002/api/agent/context", timeout=_TIMEOUT)
+        if resp.status_code == 200:
+            context["manufacturer"] = resp.json()
+    except Exception:
+        pass
+
+    # Fetch retailer context
+    try:
+        resp = httpx.get(f"{RETAILER_URL}/api/agent/context", timeout=_TIMEOUT)
+        if resp.status_code == 200:
+            context["retailer"] = resp.json()
+    except Exception:
+        pass
+
+    # Run retailer agent
+    retailer_output = _run_ai_agent(
+        "retailer", "skills/retail-manager.md", context, current_day
+    )
+
+    # Run manufacturer agent
+    manufacturer_output = _run_ai_agent(
+        "manufacturer", "skills/manufacturer-manager.md", context, current_day
+    )
+
+    return {
+        "manufacturer": {"ai_output": manufacturer_output[:500]},
+        "retailer": {"ai_output": retailer_output[:500]},
+    }
+
+
 @router.post("/run-turn")
 def run_turn(
     scenario_file: str = Query(
         default="scenarios/holiday-rush.json",
         description="Path to scenario file",
     ),
+    mode: str = Query(
+        default="heuristic",
+        description="Decision mode: 'heuristic' (fast rules) or 'ai' (real LLM agents)",
+    ),
     db: Session = Depends(get_db),
 ) -> dict:
-    """Run one simulation turn: autopilot decisions, inject demand, advance all.
+    """Run one simulation turn: inject demand, make decisions, advance all.
 
-    The manufacturer's advance_day() also advances the provider internally.
-    Includes a simple autopilot that purchases materials, creates MOs,
-    fulfills demands, and restocks the retailer.
+    mode=heuristic — fast hardcoded rules (instant).
+    mode=ai — real Claude agents via skill files (slower, ~30-60s per turn).
     """
     # Load scenario and compute today's signal
     try:
@@ -674,13 +757,19 @@ def run_turn(
     except Exception:
         pass  # degrade gracefully
 
-    # 2. Autopilot: retailer fulfills orders + restocks
-    retailer_actions = _autopilot_retailer()
+    # 2. Decisions: heuristic or AI
+    if mode == "ai":
+        autopilot_result = _ai_agents_turn(db, current_day, signal)
+    else:
+        # Heuristic autopilot
+        retailer_actions = _autopilot_retailer()
+        mfg_actions = _autopilot_manufacturer(db, current_day)
+        autopilot_result = {
+            "manufacturer": mfg_actions,
+            "retailer": retailer_actions,
+        }
 
-    # 3. Autopilot: manufacturer purchases, produces, fulfills
-    mfg_actions = _autopilot_manufacturer(db, current_day)
-
-    # 4. Advance retailer
+    # 3. Advance retailer
     try:
         httpx.post(
             f"{RETAILER_URL}/api/day/advance",
@@ -689,7 +778,7 @@ def run_turn(
     except (httpx.ConnectError, httpx.HTTPStatusError, httpx.TimeoutException):
         pass  # degrade gracefully
 
-    # 5. Advance manufacturer (this also advances provider internally)
+    # 4. Advance manufacturer (this also advances provider internally)
     try:
         adv_result = advance_day(db)
     except SimulationError as exc:
@@ -702,10 +791,8 @@ def run_turn(
         "produced": adv_result.get("produced", 0),
         "deliveries": adv_result.get("deliveries", 0),
         "expired_demands": adv_result.get("expired_demands", 0),
-        "autopilot": {
-            "manufacturer": mfg_actions,
-            "retailer": retailer_actions,
-        },
+        "autopilot": autopilot_result,
+        "mode": mode,
     }
 
     return _build_combined_state(db, scenario_file=scenario_file, turn_result=turn_result)
