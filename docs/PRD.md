@@ -363,6 +363,8 @@ POST /api/day/advance (Retailer)
 | GET | /api/agent/context | Full game state snapshot for AI agents |
 | GET | /api/dashboard/state | Combined 3-app state snapshot |
 | POST | /api/dashboard/run-turn | Run one autopilot turn (inject demand + advance all apps) |
+| GET | /api/dashboard/events | Aggregated event logs from all 3 databases |
+| GET | /api/dashboard/scenario-events | Scenario event definitions for timeline overlay |
 
 ### 6.2 Provider API (port 8001)
 
@@ -395,6 +397,8 @@ POST /api/day/advance (Retailer)
 | GET | /api/day/current | Current supplier day |
 | GET | /api/export | Export supplier state |
 | POST | /api/import | Restore supplier state |
+| GET | /api/metrics | Provider metrics time-series (stock, prices, orders per sim_day) |
+| GET | /api/events | Supplier event log (last 200, optional ?sim_day=N filter) |
 
 ### 6.3 Retailer API (port 8003)
 
@@ -413,6 +417,7 @@ POST /api/day/advance (Retailer)
 | POST | /api/purchases | Issue new B2B purchase order to manufacturer |
 | GET | /api/agent/context | Full retailer state snapshot for AI agents |
 | GET | /api/metrics | Time-series metrics rows (queried by Dashboard) |
+| GET | /api/events | Retailer event log (last 200, optional ?sim_day=N filter) |
 
 ---
 
@@ -686,6 +691,14 @@ Query parameter: `?scenario_file=scenarios/holiday-rush.json`
 - **Active events display**: lists scenario events active on the current day with their modifiers
 - **Metrics history table**: scrollable table of last 30 days showing wallet balances, stock levels, fulfillment counts
 - **Reset button**: calls `POST /api/game/reset` on Manufacturer to start a fresh run
+
+#### Charts
+
+- **Inventory Over Time**: 3 lines — parts stock, manufacturer finished goods, retailer stock
+- **Prices Over Time**: 3 lines — provider average price, manufacturer wholesale price, retailer retail price
+- **Order Fulfillment**: daily grouped bars — placed vs fulfilled vs backordered
+- **Scenario Events Timeline**: colored bands per active scenario event overlaid on the time axis
+- **Event Logs Viewer**: collapsible panel aggregating event logs from all 3 databases (provider, manufacturer, retailer)
 
 ---
 

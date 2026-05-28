@@ -182,7 +182,7 @@ frontend/
   src/
     components/               # React components
       Tabs/
-        SimDashboard.jsx      # Visual simulation dashboard: scenario selector, auto-run, 3-app status cards, SVG charts
+        SimDashboard.jsx      # Visual simulation dashboard: scenario selector, auto-run, 3-app status cards, SVG charts (inventory, prices, fulfillment, wallet), scenario timeline, event logs viewer
     utils/                    # api.js helpers, constants.js
   dist/                       # Production build (served by Manufacturer API)
 
@@ -376,6 +376,8 @@ advance_day(db):
 | GET | /api/agent/context | Full game state snapshot for AI agents |
 | GET | /api/dashboard/state | Combined 3-app state snapshot for dashboard |
 | POST | /api/dashboard/run-turn | Run one simulation turn with autopilot (inject demand + advance all) |
+| GET | /api/dashboard/events | Aggregated event logs from all 3 databases |
+| GET | /api/dashboard/scenario-events | Scenario event definitions for timeline overlay |
 
 ### Provider API (port 8001)
 
@@ -409,6 +411,8 @@ advance_day(db):
 | GET | /api/day/current | Current supplier day |
 | GET | /api/export | Export supplier state as JSON |
 | POST | /api/import | Restore supplier state from JSON |
+| GET | /api/metrics | Provider metrics history (stock, prices, orders per sim_day) |
+| GET | /api/events | Supplier event log (last 200, optional ?sim_day=N filter) |
 
 ### Retailer API (port 8003)
 
@@ -427,6 +431,7 @@ advance_day(db):
 | POST | /api/purchases | Issue new B2B purchase order to manufacturer |
 | GET | /api/agent/context | Full retailer state snapshot for AI agents |
 | GET | /api/metrics | Retailer metrics history for dashboard charts |
+| GET | /api/events | Retailer event log (last 200, optional ?sim_day=N filter) |
 
 ## Coding Conventions
 
@@ -531,6 +536,12 @@ pytest tests/ -v  # 112 tests, ~4s
 - `app/api/dashboard.py` — combined 3-app orchestration endpoint with built-in autopilot
 - `frontend/src/components/Tabs/SimDashboard.jsx` — visual simulation dashboard with scenario selector, auto-run, 3-app status cards, SVG charts
 - `retailer/api/game.py` — added `GET /api/metrics` for dashboard chart data
+- `GET /api/metrics` and `GET /api/events` endpoints added to Provider API for dashboard integration
+- `GET /api/events` endpoint added to Retailer API for dashboard integration
+- `GET /api/dashboard/events` — aggregates event logs from all 3 databases into a single response
+- `GET /api/dashboard/scenario-events` — returns scenario event definitions for timeline visualization
+- Dashboard expanded: inventory over time chart (3 lines), prices over time chart (3 lines), order fulfillment bar chart (placed/fulfilled/backordered), scenario events timeline with colored bands, collapsible event logs viewer showing events from all 3 databases
+- Dashboard metrics history now includes price data from all 3 apps (provider avg, manufacturer wholesale, retailer retail)
 
 ### Notable Bug Fixes
 - Missing `Client` seed record (FK violation on demand generation)
