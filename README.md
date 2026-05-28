@@ -123,7 +123,8 @@ app/                        # Manufacturer API (port 8002)
     purchasing.py           # Suppliers + purchase order endpoints
     sales.py                # Sales order endpoints (B2B orders from Retailer)
     agent.py                # GET /api/agent/context — full state for AI agents
-    dashboard.py            # GET /api/dashboard — metrics and scenario data for the UI
+    dashboard.py            # /api/dashboard/* — combined 3-app state, autopilot,
+                            #   aggregated event logs, and scenario event definitions
 
 supplier_api/               # Provider API (port 8001) — standalone microservice
   main.py                   # FastAPI app entrypoint
@@ -324,10 +325,12 @@ python analysis.py --scenario calm-market \
 
 Four chart types are produced:
 
-1. **Inventory over time** — parts stock and finished-goods levels across all three tiers
-2. **Prices over time** — raw material and retail price movements per day
+1. **Inventory over time** — parts stock, finished-goods, and retailer stock levels across all three tiers
+2. **Prices over time** — provider, manufacturer, and retailer price movements per day
 3. **Order fulfillment bars** — orders placed, fulfilled, and backordered per day
 4. **Scenario events overlay** — active events (demand/supply/lead-time modifiers) annotated on the timeline
+
+The **Sim Dashboard** tab in the browser provides the same four charts as real-time SVG visualisations updated after each simulated day, plus a **Wallet Over Time** chart tracking cash balance. A **Scenario Events Timeline** renders colored event bands aligned to simulation days, and a collapsible **Event Logs** viewer aggregates events from all three databases (Manufacturer, Provider, Retailer) via `GET /api/dashboard/events`.
 
 ## Gameplay Loop
 
