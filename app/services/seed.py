@@ -150,7 +150,14 @@ def seed_initial_data() -> None:
         db.close()
 
 
-from app.db.models import DemandOrder, Event, LocalPurchaseOrder, ManufacturingOrder
+from app.db.models import (
+    DemandOrder,
+    Event,
+    LocalPurchaseOrder,
+    ManufacturerMetrics,
+    ManufacturingOrder,
+    SalesOrder,
+)
 
 
 def reset_game(db: Session, daily_production_capacity: int = 10, starting_wallet: float = 10000.0) -> None:
@@ -163,6 +170,8 @@ def reset_game(db: Session, daily_production_capacity: int = 10, starting_wallet
     db.query(ManufacturingOrder).delete()
     db.query(Event).delete()
     db.query(LocalPurchaseOrder).delete()
+    db.query(SalesOrder).delete()
+    db.query(ManufacturerMetrics).delete()
 
     # Reset inventory to 150 units each
     for inv in db.query(Inventory).all():
@@ -178,3 +187,17 @@ def reset_game(db: Session, daily_production_capacity: int = 10, starting_wallet
     game_state.last_updated = datetime.utcnow()
 
     db.commit()
+
+    # Reset Provider and Retailer APIs (best-effort)
+    from app.services import supplier_client
+
+    try:
+        supplier_client.reset_supplier()
+    except supplier_client.SupplierAPIError:
+        pass
+
+    try:
+        import httpx
+        httpx.post("http://localhost:8003/api/reset", timeout=httpx.Timeout(10.0))
+    except Exception:
+        pass

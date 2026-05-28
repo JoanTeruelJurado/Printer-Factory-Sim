@@ -446,6 +446,30 @@ def reset_orders(db: Session = Depends(get_db)) -> dict:
     return {"deleted": count}
 
 
+@router.post("/api/reset")
+def reset_provider(db: Session = Depends(get_db)) -> dict:
+    """Full reset: clear orders, events, metrics; reset stock, prices, and day to 1."""
+    db.query(PurchaseOrder).delete()
+    db.query(SupplierEvent).delete()
+    db.query(ProviderMetrics).delete()
+
+    # Reset all prices to factor 1.0
+    for sp in db.query(SupplierProduct).all():
+        sp.daily_price_factor = 1.0
+
+    # Reset all stock to 500
+    for stock in db.query(Stock).all():
+        stock.quantity = 500
+
+    # Reset sim day to 1
+    day_row = db.query(SimState).filter_by(key="current_day").first()
+    if day_row:
+        day_row.value = "1"
+
+    db.commit()
+    return {"success": True, "message": "Provider reset to initial state."}
+
+
 @router.post("/prices/fluctuate")
 def fluctuate_prices(db: Session = Depends(get_db)) -> dict:
     """Apply ±10% random price fluctuation to all SupplierProduct.daily_price_factor."""

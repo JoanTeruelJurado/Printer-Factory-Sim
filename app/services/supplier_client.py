@@ -163,3 +163,8 @@ def fluctuate_prices() -> None:
 def reset_orders() -> int:
     """Delete all purchase orders in the Supplier API. Returns count deleted."""
     return _delete("/orders").json().get("deleted", 0)
+
+
+def reset_supplier() -> dict:
+    """Full reset of the Supplier API: orders, events, metrics, stock, prices, day."""
+    return _post("/api/reset", {}).json()

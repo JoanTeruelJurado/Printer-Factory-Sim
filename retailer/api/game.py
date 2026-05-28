@@ -256,6 +256,35 @@ def list_events(
     ]
 
 
+@router.post("/reset")
+def reset_retailer_state(db: Session = Depends(get_db)) -> dict:
+    """Full reset: wipe all transactional data, metrics, and re-seed catalog."""
+    from retailer.seed import seed_retailer_data
+
+    db.query(RetailerMetrics).delete()
+    db.query(RetailerEvent).delete()
+    db.query(CustomerOrder).delete()
+    db.query(RetailerPurchaseOrder).delete()
+    db.query(RetailerStock).delete()
+    db.query(Catalog).delete()
+
+    # Reset game state
+    state = db.query(RetailerGameState).filter(RetailerGameState.id == 1).first()
+    if state is None:
+        raise HTTPException(status_code=404, detail="Retailer game state not found")
+    state.current_day = 1
+    state.wallet_balance = 50000.0
+    state.game_over = False
+    state.last_updated = datetime.utcnow()
+
+    db.commit()
+
+    # Re-seed catalog
+    seed_retailer_data(db)
+
+    return {"success": True, "message": "Retailer reset to initial state."}
+
+
 @router.get("/export")
 def export_retailer(db: Session = Depends(get_db)) -> JSONResponse:
     """Export full retailer state as a downloadable JSON snapshot."""
