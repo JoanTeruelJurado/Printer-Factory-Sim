@@ -15,7 +15,9 @@ from sqlalchemy.orm import Session
 
 from app.db.database import get_db
 from app.db.models import (
+    BOM,
     DemandOrder,
+    Event,
     GameState,
     Inventory,
     ManufacturerMetrics,
@@ -24,7 +26,6 @@ from app.db.models import (
     RawMaterial,
     SalesOrder,
 )
-from app.db.models import BOM
 from app.services.inventory import check_material_availability
 from app.services.production import (
     ProductionError,
@@ -246,8 +247,46 @@ def _build_provider_state(
     }
 
 
+def _fetch_provider_metrics() -> list[dict]:
+    """GET /api/metrics from the Provider API."""
+    try:
+        resp = httpx.get(f"{PROVIDER_URL}/api/metrics", timeout=_TIMEOUT)
+        if resp.status_code == 200:
+            return resp.json()
+    except (httpx.ConnectError, httpx.HTTPStatusError, httpx.TimeoutException):
+        pass
+    return []
+
+
+def _first_value(json_str: str | None) -> float:
+    """Extract the first numeric value from a JSON dict string."""
+    if not json_str:
+        return 0.0
+    try:
+        d = json.loads(json_str) if isinstance(json_str, str) else json_str
+        if isinstance(d, dict) and d:
+            return float(next(iter(d.values())))
+    except (json.JSONDecodeError, StopIteration, TypeError, ValueError):
+        pass
+    return 0.0
+
+
+def _avg_value(json_str: str | None) -> float:
+    """Average of all numeric values in a JSON dict string."""
+    if not json_str:
+        return 0.0
+    try:
+        d = json.loads(json_str) if isinstance(json_str, str) else json_str
+        if isinstance(d, dict) and d:
+            vals = [float(v) for v in d.values()]
+            return sum(vals) / len(vals) if vals else 0.0
+    except (json.JSONDecodeError, TypeError, ValueError):
+        pass
+    return 0.0
+
+
 def _build_metrics_history(db: Session) -> list[dict]:
-    """Read last 30 days of metrics from ManufacturerMetrics."""
+    """Read last 30 days of metrics from all three apps."""
     rows = (
         db.query(ManufacturerMetrics)
         .order_by(ManufacturerMetrics.sim_day.desc())
@@ -266,6 +305,11 @@ def _build_metrics_history(db: Session) -> list[dict]:
     except (httpx.ConnectError, httpx.HTTPStatusError, httpx.TimeoutException):
         pass
 
+    # Fetch provider metrics via HTTP
+    provider_metrics: dict[int, dict] = {}
+    for m in _fetch_provider_metrics():
+        provider_metrics[m.get("sim_day", 0)] = m
+
     history: list[dict] = []
     for row in rows:
         parts = json.loads(row.parts_stock_json) if row.parts_stock_json else {}
@@ -282,6 +326,13 @@ def _build_metrics_history(db: Session) -> list[dict]:
             except (json.JSONDecodeError, AttributeError):
                 pass
 
+        prov = provider_metrics.get(row.sim_day, {})
+
+        # Prices: representative value from each app
+        provider_price = _avg_value(prov.get("price_json"))
+        mfg_wholesale = _avg_value(row.wholesale_price_json)
+        retailer_price = _avg_value(ret.get("retail_price_json"))
+
         history.append({
             "day": row.sim_day,
             "mfg_wallet": round(row.wallet_balance, 2),
@@ -292,6 +343,10 @@ def _build_metrics_history(db: Session) -> list[dict]:
             "produced": round(row.production_utilisation * 10, 1),  # approx
             "fulfilled": ret.get("customer_orders_fulfilled", 0),
             "backordered": ret.get("customer_orders_backordered", 0),
+            "placed": ret.get("customer_orders_placed", 0),
+            "provider_price": round(provider_price, 2),
+            "mfg_wholesale": round(mfg_wholesale, 2),
+            "retailer_price": round(retailer_price, 2),
         })
 
     return history
@@ -654,3 +709,65 @@ def run_turn(
     }
 
     return _build_combined_state(db, scenario_file=scenario_file, turn_result=turn_result)
+
+
+@router.get("/events")
+def get_aggregated_events(
+    limit: int = Query(default=100, le=500),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Aggregate events from all three apps for the event log viewer."""
+    # Manufacturer events (local DB)
+    mfg_events = (
+        db.query(Event).order_by(Event.id.desc()).limit(limit).all()
+    )
+    mfg_list = [
+        {
+            "id": e.id,
+            "sim_day": e.sim_day,
+            "event_type": e.event_type,
+            "category": e.category,
+            "details": e.details,
+            "timestamp": str(e.timestamp),
+        }
+        for e in reversed(mfg_events)
+    ]
+
+    # Provider events (HTTP)
+    prov_list: list[dict] = []
+    try:
+        resp = httpx.get(f"{PROVIDER_URL}/api/events", timeout=_TIMEOUT)
+        if resp.status_code == 200:
+            prov_list = resp.json()
+    except (httpx.ConnectError, httpx.HTTPStatusError, httpx.TimeoutException):
+        pass
+
+    # Retailer events (HTTP)
+    ret_list: list[dict] = []
+    try:
+        resp = httpx.get(f"{RETAILER_URL}/api/events", timeout=_TIMEOUT)
+        if resp.status_code == 200:
+            ret_list = resp.json()
+    except (httpx.ConnectError, httpx.HTTPStatusError, httpx.TimeoutException):
+        pass
+
+    return {
+        "manufacturer": mfg_list,
+        "provider": prov_list,
+        "retailer": ret_list,
+    }
+
+
+@router.get("/scenario-events")
+def get_scenario_events(
+    scenario_file: str = Query(
+        default="scenarios/holiday-rush.json",
+        description="Path to scenario file",
+    ),
+) -> list[dict]:
+    """Return the list of events defined in a scenario file (for timeline overlay)."""
+    try:
+        scenario = _get_scenario(scenario_file)
+        return scenario.get("events", [])
+    except (FileNotFoundError, ValueError):
+        return []

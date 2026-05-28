@@ -23,6 +23,8 @@ CLI / standalone endpoints (human/agent use):
   PUT  /api/pricing/tiers/{tier_id}       — update a pricing tier
   POST /api/day/advance                    — advance simulation day, ship due orders
   GET  /api/day/current                    — current simulation day
+  GET  /api/metrics                        — provider metrics history
+  GET  /api/events                         — supplier event log (last 200)
   GET  /api/export                         — JSON snapshot export
   POST /api/import                         — restore from JSON snapshot
 """
@@ -818,6 +820,48 @@ def api_advance_day(db: Session = Depends(get_db)) -> dict:
 def api_current_day(db: Session = Depends(get_db)) -> DayOut:
     """Return the supplier's current simulation day."""
     return DayOut(current_day=_get_sim_day(db))
+
+
+@router.get("/api/metrics")
+def api_metrics(db: Session = Depends(get_db)) -> list[dict]:
+    """Return all provider metrics rows ordered by sim_day."""
+    rows = db.query(ProviderMetrics).order_by(ProviderMetrics.sim_day).all()
+    return [
+        {
+            "sim_day": r.sim_day,
+            "stock_json": r.stock_json,
+            "price_json": r.price_json,
+            "orders_pending": r.orders_pending,
+            "orders_shipped": r.orders_shipped,
+            "orders_delivered": r.orders_delivered,
+        }
+        for r in rows
+    ]
+
+
+@router.get("/api/events")
+def api_events(
+    sim_day: int | None = Query(default=None, description="Filter events by simulation day"),
+    db: Session = Depends(get_db),
+) -> list[dict]:
+    """Return the last 200 supplier events in chronological order."""
+    q = db.query(SupplierEvent)
+    if sim_day is not None:
+        q = q.filter(SupplierEvent.sim_day == sim_day)
+    rows = q.order_by(SupplierEvent.id.desc()).limit(200).all()
+    rows.reverse()
+    return [
+        {
+            "id": e.id,
+            "sim_day": e.sim_day,
+            "event_type": e.event_type,
+            "entity_type": e.entity_type,
+            "entity_id": e.entity_id,
+            "detail": e.detail,
+            "created_at": e.created_at.isoformat() if e.created_at else None,
+        }
+        for e in rows
+    ]
 
 
 @router.get("/api/export")

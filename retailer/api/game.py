@@ -2,8 +2,9 @@
 
 import json
 from datetime import datetime
+from typing import Optional
 
-from fastapi import APIRouter, Body, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
@@ -221,11 +222,37 @@ def get_metrics(db: Session = Depends(get_db)) -> list[dict]:
             "sim_day": r.sim_day,
             "wallet_balance": r.wallet_balance,
             "printer_stock_json": r.printer_stock_json,
+            "retail_price_json": r.retail_price_json,
             "customer_orders_placed": r.customer_orders_placed,
             "customer_orders_fulfilled": r.customer_orders_fulfilled,
             "customer_orders_backordered": r.customer_orders_backordered,
         }
         for r in rows
+    ]
+
+
+@router.get("/events")
+def list_events(
+    sim_day: Optional[int] = Query(None, description="Filter events by simulation day"),
+    db: Session = Depends(get_db),
+) -> list[dict]:
+    """Return the last 200 retailer events in chronological order."""
+    query = db.query(RetailerEvent)
+    if sim_day is not None:
+        query = query.filter(RetailerEvent.sim_day == sim_day)
+    rows = query.order_by(RetailerEvent.id.desc()).limit(200).all()
+    rows.reverse()
+    return [
+        {
+            "id": e.id,
+            "sim_day": e.sim_day,
+            "event_type": e.event_type,
+            "entity_type": e.entity_type,
+            "entity_id": e.entity_id,
+            "detail": e.detail,
+            "created_at": e.created_at.isoformat() if e.created_at else None,
+        }
+        for e in rows
     ]
 
 
