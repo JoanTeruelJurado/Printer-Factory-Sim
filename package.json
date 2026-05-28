@@ -1,0 +1,19 @@
+{
+  "name": "printer-factory-sim",
+  "version": "1.0.0",
+  "description": "A discrete-event simulation of a full retail supply chain for 3D printers. Three autonomous microservices — Provider, Manufacturer, and Retailer — interact across simulated days. A Turn Engine orchestrates each day cycle, injects customer demand, and invokes AI agents at each node. You (or an AI agent) act as planner at any tier — managing inventory, purchasing, scheduling production, and fulfilling demand before the wallet runs dry.",
+  "main": "gen_pptx.js",
+  "directories": {
+    "doc": "docs",
+    "test": "tests"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "pptxgenjs": "^4.0.1"
+  }
+}
